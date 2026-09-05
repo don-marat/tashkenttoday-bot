@@ -170,16 +170,30 @@ def check_fb_expiry():
 def get_post_link(mid):
     return f"https://t.me/{SOURCE_USERNAME}/{mid}"
 
-def format_text_threads(text, mid):
-    link = get_post_link(mid)
-    title = text.strip().split("\n")[0].strip()
-    return f"{title}\n\nПодробнее: {link}"
-
-def format_text_facebook(text, mid):
+def format_text_threads(text, mid, with_link=True):
     link = get_post_link(mid)
     clean = text.strip()
     if not clean:
-        return f"Подробнее: {link}"
+        return f"Подробнее: {link}" if with_link else ""
+    title = clean.split("\n")[0].strip()
+    rest = clean[len(title):].strip()
+    paras = [p.strip() for p in rest.split("\n\n") if p.strip()]
+    first = paras[0] if paras else ""
+    if len(first) > 300:
+        first = first[:297] + "..."
+    if first:
+        base = f"{title}\n\n{first}"
+    else:
+        base = f"{title}"
+    if with_link:
+        return f"{base}\n\nПодробнее: {link}"
+    return base
+
+def format_text_facebook(text, mid, with_link=True):
+    link = get_post_link(mid)
+    clean = text.strip()
+    if not clean:
+        return f"Подробнее: {link}" if with_link else ""
     title = clean.split("\n")[0].strip()
     rest = clean[len(title):].strip()
     paras = [p.strip() for p in rest.split("\n\n") if p.strip()]
@@ -187,25 +201,29 @@ def format_text_facebook(text, mid):
     if len(first) > 1000:
         first = first[:997] + "..."
     if first:
-        return f"{title}\n\n{first}\n\nПодробнее: {link}"
+        base = f"{title}\n\n{first}"
     else:
-        return f"{title}\n\nПодробнее: {link}"
+        base = f"{title}"
+    if with_link:
+        return f"{base}\n\nПодробнее: {link}"
+    return base
 
-def upload_to_public_host(tg_url):
+def upload_to_public_host(tg_url, filename="image.jpg", mime="image/jpeg"):
     try:
         logger.info(f"Downloading TG file: {tg_url[:80]}...")
-        img_data = requests.get(tg_url, timeout=20).content
+        img_data = requests.get(tg_url, timeout=60).content
         if len(img_data) < 1000:
             return None
+        # catbox поддерживает и видео до 200MB
         try:
-            r = requests.post("https://catbox.moe/user/api.php", data={"reqtype": "fileupload"}, files={"fileToUpload": ("image.jpg", img_data, "image/jpeg")}, timeout=20)
+            r = requests.post("https://catbox.moe/user/api.php", data={"reqtype": "fileupload"}, files={"fileToUpload": (filename, img_data, mime)}, timeout=60)
             if r.status_code == 200 and r.text.startswith("https://"):
                 logger.info(f"Uploaded to catbox: {r.text.strip()}")
                 return r.text.strip()
         except Exception as e:
             logger.error(f"Catbox error: {e}")
         try:
-            r = requests.post("https://0x0.st", files={"file": ("image.jpg", img_data, "image/jpeg")}, timeout=20)
+            r = requests.post("https://0x0.st", files={"file": (filename, img_data, mime)}, timeout=60)
             if r.status_code == 200 and r.text.startswith("https://"):
                 logger.info(f"Uploaded to 0x0.st: {r.text.strip()}")
                 return r.text.strip()
@@ -216,8 +234,20 @@ def upload_to_public_host(tg_url):
         logger.error(f"upload error: {e}")
         return None
 
-def post_to_facebook(text, tg_img=None, pub_img=None):
+def post_to_facebook(text, tg_img=None, pub_img=None, video_url=None):
     try:
+        # Если есть видео - постим как видео
+        if video_url:
+            url = f"https://graph.facebook.com/v20.0/{FB_PAGE_ID}/videos"
+            data = {"description": text, "file_url": video_url, "access_token": FB_PAGE_TOKEN}
+            r = requests.post(url, data=data, timeout=120)
+            logger.info(f"FB VIDEO: {r.status_code} {r.text[:800]}")
+            if any(x in r.text for x in ["Session has expired", "Error validating access token"]):
+                if refresh_fb_page_token():
+                    data["access_token"] = FB_PAGE_TOKEN
+                    r = requests.post(url, data=data, timeout=120)
+                    logger.info(f"FB VIDEO RETRY: {r.status_code} {r.text[:800]}")
+            return r.json()
         img_url = pub_img or tg_img
         if img_url:
             url = f"https://graph.facebook.com/v20.0/{FB_PAGE_ID}/photos"
@@ -236,10 +266,29 @@ def post_to_facebook(text, tg_img=None, pub_img=None):
     except Exception as e:
         logger.error(f"FB error: {e}")
 
-def post_to_threads(text, tg_img=None, pub_img=None):
+def post_to_threads(text, tg_img=None, pub_img=None, video_url=None):
     try:
         create_url = f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads"
         short_text = text[:480] if len(text) > 480 else text
+        # Видео приоритет
+        if video_url:
+            payload = {"media_type": "VIDEO", "text": short_text, "video_url": video_url, "access_token": THREADS_TOKEN}
+            r = requests.post(create_url, data=payload, timeout=60)
+            logger.info(f"Threads VIDEO: {r.text[:800]}")
+            cid = r.json().get("id")
+            if cid:
+                # Видео обрабатывается дольше
+                time.sleep(10)
+                pub_url = f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads_publish"
+                r2 = requests.post(pub_url, data={"creation_id": cid, "access_token": THREADS_TOKEN}, timeout=60)
+                logger.info(f"Threads publish VIDEO: {r2.text[:800]}")
+                if r2.status_code == 200 and r2.json().get("id"):
+                    return r2.json()
+                # Если еще не готово, ждем еще
+                time.sleep(15)
+                r2 = requests.post(pub_url, data={"creation_id": cid, "access_token": THREADS_TOKEN}, timeout=60)
+                logger.info(f"Threads publish VIDEO retry: {r2.text[:800]}")
+                return r2.json()
         img_to_use = pub_img
         if img_to_use:
             payload = {"media_type": "IMAGE", "text": short_text, "image_url": img_to_use, "access_token": THREADS_TOKEN}
@@ -281,23 +330,34 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not raw_text:
         return
     mid = post.message_id
-    fb_text = format_text_facebook(raw_text, mid)
-    th_text = format_text_threads(raw_text, mid)
+    is_video = bool(post.video)
+    # Для видео - без ссылки, для фото/текста - с ссылкой
+    fb_text = format_text_facebook(raw_text, mid, with_link=not is_video)
+    th_text = format_text_threads(raw_text, mid, with_link=not is_video)
     tg_img = None
     pub_img = None
+    pub_video = None
     if post.photo:
         file = await post.photo[-1].get_file()
         tg_img = file.file_path
-        pub_img = upload_to_public_host(tg_img)
+        pub_img = upload_to_public_host(tg_img, "image.jpg", "image/jpeg")
     elif post.video:
         try:
             file = await post.video.get_file()
-            tg_img = file.file_path
-        except:
-            pass
-    logger.info(f"Новый пост {mid}: {raw_text[:80]}... tg_img={bool(tg_img)} public={pub_img}")
-    post_to_facebook(fb_text, tg_img, pub_img)
-    post_to_threads(th_text, tg_img, pub_img)
+            tg_file_url = file.file_path
+            # Telegram возвращает относительный путь, делаем полный URL
+            if tg_file_url and not tg_file_url.startswith("http"):
+                tg_file_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{tg_file_url}"
+            logger.info(f"Video TG url: {tg_file_url[:100]}")
+            # Заливаем видео на catbox/0x0
+            pub_video = upload_to_public_host(tg_file_url, "video.mp4", "video/mp4")
+            # Для превью оставляем tg_img как fallback
+            tg_img = tg_file_url
+        except Exception as e:
+            logger.error(f"Video handling error: {e}")
+    logger.info(f"Новый пост {mid}: {raw_text[:80]}... is_video={is_video} tg_img={bool(tg_img)} public_img={pub_img} public_video={bool(pub_video)}")
+    post_to_facebook(fb_text, tg_img, pub_img, video_url=pub_video)
+    post_to_threads(th_text, tg_img, pub_img, video_url=pub_video)
 
 async def auto_refresh_job(context: ContextTypes.DEFAULT_TYPE):
     logger.info("⏰ Авто-проверка FB + Threads...")
@@ -343,7 +403,7 @@ def main():
         logger.info("JobQueue: авто-рефреш FB+Threads каждые 24ч")
     logger.info(f"Бот запущен {SOURCE_CHANNEL} -> FB:{FB_PAGE_ID} + Threads:{THREADS_USER_ID} | Авто-обновление FB+Threads: ВКЛ (Вариант B)")
     # Важно: drop_pending_updates=True чтобы не обрабатывать старые посты при рестарте
-    app.run_polling(allowed_updates=["channel_post"], poll_interval=10.0, timeout=30, drop_pending_updates=True, close_loop=False)
+    app.run_polling(allowed_updates=["channel_post"], poll_interval=60.0, timeout=50, drop_pending_updates=True, close_loop=False)
 
 if __name__ == "__main__":
     main()
