@@ -1,2 +1,9 @@
 [deploy]
 startCommand = "python bot.py"
+restartPolicyType = "onFailure"
+restartPolicyMaxRetries = 3
+
+# Фиксируем 1 реплику чтобы не было 409 Conflict
+[deploy.replicas]
+min = 1
+max = 1
