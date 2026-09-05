@@ -90,8 +90,9 @@ def main():
         return
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, handle_channel_post))
-    logger.info(f"Бот запущен {SOURCE_CHANNEL} -> FB:{FB_PAGE_ID} + Threads:{THREADS_USER_ID} | Формат: Заголовок+Картинка+Ссылка")
-    app.run_polling(allowed_updates=["channel_post"])
+    logger.info(f"Бот запущен {SOURCE_CHANNEL} -> FB:{FB_PAGE_ID} + Threads:{THREADS_USER_ID} | Формат: Заголовок+Картинка+Ссылка | Интервал 10 мин")
+    # Проверка каждые 10 минут = 600 секунд
+    app.run_polling(allowed_updates=["channel_post"], poll_interval=600.0, timeout=30)
 
 if __name__ == "__main__":
     main()
