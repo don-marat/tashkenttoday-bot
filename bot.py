@@ -6,6 +6,8 @@ import asyncio
 from collections import defaultdict
 from telegram import Update
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
+from datetime import datetime, timezone, timedelta
+import json
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -14,8 +16,30 @@ logger = logging.getLogger(__name__)
 MEDIA_GROUP_CACHE = defaultdict(list)
 MEDIA_GROUP_LAST_TEXT = {}
 
+# === Настройки графика и видео ===
+WORK_START_HOUR = int(os.getenv("WORK_START_HOUR", "9"))
+WORK_END_HOUR = int(os.getenv("WORK_END_HOUR", "20"))  # не включительно, т.е. до 19:59
+TASHKENT_TZ = timezone(timedelta(hours=5))
+DISABLE_VIDEO = os.getenv("DISABLE_VIDEO", "true").lower() in ("1", "true", "yes")
+
+def is_working_hours(now=None):
+    if now is None:
+        now = datetime.now(TASHKENT_TZ)
+    h = now.hour
+    return WORK_START_HOUR <= h < WORK_END_HOUR
+
+def next_work_start():
+    now = datetime.now(TASHKENT_TZ)
+    nxt = now.replace(hour=WORK_START_HOUR, minute=0, second=0, microsecond=0)
+    if now.hour >= WORK_END_HOUR:
+        nxt = nxt + timedelta(days=1)
+    elif now.hour < WORK_START_HOUR:
+        pass  # сегодня в 9:00
+    else:
+        return now
+    return nxt
+
 # === Дедупликация: какие посты уже опубликованы ===
-import json
 POSTED_FILE = os.getenv("POSTED_FILE", "posted_ids.json")
 POSTED_IDS = set()
 
@@ -478,7 +502,21 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.info(f"Пост {mid} уже был опубликован, пропускаем")
         return
 
+    # === График работы 9:00-20:00 Ташкент - после 20:00 пропускаем ===
+    if not is_working_hours():
+        now_t = datetime.now(TASHKENT_TZ).strftime("%H:%M")
+        logger.info(f"⏰ Вне графика 9-20 (сейчас {now_t} Ташкент), пост {mid} пропускаем")
+        save_posted_id(mid)  # помечаем как обработанный чтобы не запостить утром
+        return
+
     is_video = bool(post.video)
+
+    # === Видео временно отключено ===
+    if is_video and DISABLE_VIDEO:
+        logger.info(f"🎬 Видео постинг отключен (DISABLE_VIDEO=true), пост {mid} пропускаем")
+        save_posted_id(mid)  # помечаем как обработанный чтобы не копить
+        return
+
     # Для видео - без ссылки, для фото/текста - с ссылкой
     fb_text = format_text_facebook(raw_text, mid, with_link=not is_video)
     th_text = format_text_threads(raw_text, mid, with_link=not is_video)
@@ -489,7 +527,7 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
         file = await post.photo[-1].get_file()
         tg_img = file.file_path
         pub_img = upload_to_public_host(tg_img, "image.jpg", "image/jpeg")
-    elif post.video:
+    elif post.video and not DISABLE_VIDEO:
         try:
             file = await post.video.get_file()
             tg_file_url = file.file_path
@@ -525,6 +563,12 @@ async def process_album_job(context: ContextTypes.DEFAULT_TYPE):
     # Проверка дедупликации для альбома
     if is_already_posted(mid):
         logger.info(f"Альбом {mg_id} пост {mid} уже был опубликован, пропускаем")
+        return
+    # График 9-20 для альбомов тоже - пропускаем
+    if not is_working_hours():
+        now_t = datetime.now(TASHKENT_TZ).strftime("%H:%M")
+        logger.info(f"⏰ Альбом {mg_id} вне графика 9-20 (сейчас {now_t}), пропускаем")
+        save_posted_id(mid)
         return
     logger.info(f"Альбом {mg_id}: обрабатываем {len(posts)} фото, текст: {raw_text[:60]}...")
     pub_imgs = []
@@ -597,7 +641,9 @@ def main():
     if app.job_queue:
         app.job_queue.run_repeating(auto_refresh_job, interval=24*60*60, first=60)
         logger.info("JobQueue: авто-рефреш FB+Threads каждые 24ч")
-    logger.info(f"Бот запущен {SOURCE_CHANNEL} -> FB:{FB_PAGE_ID} + Threads:{THREADS_USER_ID} | Авто-обновление FB+Threads: ВКЛ | Дедупликация: {len(POSTED_IDS)} ID | drop_pending=False")
+    now_t = datetime.now(TASHKENT_TZ).strftime("%H:%M")
+    in_hours = is_working_hours()
+    logger.info(f"Бот запущен {SOURCE_CHANNEL} -> FB:{FB_PAGE_ID} + Threads:{THREADS_USER_ID} | Время Ташкент: {now_t} | В графике 9-20: {in_hours} | Видео: {'ВЫКЛ' if DISABLE_VIDEO else 'ВКЛ'} | Дедупликация: {len(POSTED_IDS)} ID | Пропуск после 20:00: ВКЛ | drop_pending=False")
     # drop_pending_updates=False - чтобы проверять последние посты если бот был оффлайн
     app.run_polling(allowed_updates=["channel_post"], poll_interval=60.0, timeout=50, drop_pending_updates=False, close_loop=False)
 
