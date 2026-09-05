@@ -131,15 +131,15 @@ def refresh_fb_page_token():
         return None
     try:
         FB_USER_TOKEN = refresh_fb_user_token() or FB_USER_TOKEN
-        url = f"https://graph.facebook.com/v20.0/me?fields=accounts{{id,name,access_token}}&access_token={FB_USER_TOKEN}"
+        # Правильный endpoint: /me/accounts
+        url = f"https://graph.facebook.com/v20.0/me/accounts?fields=id,name,access_token&access_token={FB_USER_TOKEN}"
         r = requests.get(url, timeout=20)
         logger.info(f"FB accounts: {r.text[:800]}")
         data = r.json()
-        accounts = []
-        if "accounts" in data:
+        accounts = data.get("data", []) if "data" in data else []
+        # Если accounts пусто, пробуем второй формат
+        if not accounts and "accounts" in data:
             accounts = data["accounts"].get("data", [])
-        elif "data" in data:
-            accounts = data["data"]
         for acc in accounts:
             if acc.get("id") == FB_PAGE_ID:
                 new_t = acc.get("access_token")
@@ -149,7 +149,7 @@ def refresh_fb_page_token():
                     railway_update("FB_PAGE_TOKEN", new_t)
                     logger.info(f"✅ FB Page token refreshed len={len(new_t)}")
                     return new_t
-        logger.error(f"FB Page {FB_PAGE_ID} not found in {accounts}")
+        logger.error(f"FB Page {FB_PAGE_ID} not found in {accounts} - full response: {r.text[:1000]}")
         return None
     except Exception as e:
         logger.error(f"refresh_fb_page: {e}")
@@ -310,13 +310,23 @@ async def auto_refresh_job(context: ContextTypes.DEFAULT_TYPE):
     if th_new:
         logger.info("✅ Threads auto-refresh OK")
 
+async def error_handler(update, context):
+    err = str(context.error)
+    if "Conflict" in err or "409" in err or "terminated by other getUpdates" in err:
+        logger.warning(f"⚠️ Conflict: другой инстанс бота запущен. Ждем 10 сек... {err[:200]}")
+        time.sleep(10)
+    else:
+        logger.error(f"Error: {context.error}")
+
 def main():
     if not TELEGRAM_BOT_TOKEN:
         logger.error("Нет TELEGRAM_BOT_TOKEN!")
         return
+    # Удаляем webhook и ждем чтобы Telegram успел
     try:
         requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=True", timeout=10)
-        logger.info("Webhook удален")
+        logger.info("Webhook удален, ждем 3 сек...")
+        time.sleep(3)
     except:
         pass
     global THREADS_TOKEN, FB_PAGE_TOKEN, FB_USER_TOKEN
@@ -327,10 +337,12 @@ def main():
     check_threads_expiry()
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, handle_channel_post))
+    app.add_error_handler(error_handler)
     if app.job_queue:
         app.job_queue.run_repeating(auto_refresh_job, interval=24*60*60, first=60)
         logger.info("JobQueue: авто-рефреш FB+Threads каждые 24ч")
     logger.info(f"Бот запущен {SOURCE_CHANNEL} -> FB:{FB_PAGE_ID} + Threads:{THREADS_USER_ID} | Авто-обновление FB+Threads: ВКЛ (Вариант B)")
+    # Важно: drop_pending_updates=True чтобы не обрабатывать старые посты при рестарте
     app.run_polling(allowed_updates=["channel_post"], poll_interval=10.0, timeout=30, drop_pending_updates=True, close_loop=False)
 
 if __name__ == "__main__":
