@@ -315,6 +315,7 @@ def post_to_facebook(text, tg_img=None, pub_img=None, video_url=None, pub_imgs=N
                     data["access_token"] = FB_PAGE_TOKEN
                     r = requests.post(url, data=data, timeout=120)
                     logger.info(f"FB VIDEO RETRY: {r.status_code} {r.text[:800]}")
+            # Видео в группу пока не репостим (группы не поддерживают file_url)
             return r.json()
 
         img_list = pub_imgs or ([pub_img or tg_img] if (pub_img or tg_img) else [])
@@ -345,7 +346,13 @@ def post_to_facebook(text, tg_img=None, pub_img=None, video_url=None, pub_imgs=N
                     fr = requests.post(feed_url, data=feed_data, timeout=30)
                     logger.info(f"FB multi-photo post: {fr.status_code} {fr.text[:600]}")
                     if fr.status_code == 200 and fr.json().get("id"):
-                        return fr.json()
+                        result = fr.json()
+                        # === Репост в группу для multi-photo - постим напрямую те же фото ===
+                        try:
+                            share_to_facebook_group(result.get("id") or result.get("post_id"), text, pub_imgs=img_list)
+                        except Exception as e:
+                            logger.error(f"FB group share error multi: {e}")
+                        return result
                     # Если multi не сработал, fallback на 1 фото
                     logger.warning(f"FB multi-photo failed, fallback to single: {fr.text[:400]}")
                 except Exception as e:
@@ -368,18 +375,18 @@ def post_to_facebook(text, tg_img=None, pub_img=None, video_url=None, pub_imgs=N
                 r = requests.post(url, data=data, timeout=30)
                 logger.info(f"FB RETRY: {r.status_code} {r.text[:500]}")
         result = r.json()
-        # === Репост в группу ===
+        # === Репост в группу - постим напрямую ===
         if result.get("id") or result.get("post_id"):
             try:
-                share_to_facebook_group(result.get("id") or result.get("post_id"), text)
+                share_to_facebook_group(result.get("id") or result.get("post_id"), text, pub_imgs=img_list)
             except Exception as e:
                 logger.error(f"FB group share error: {e}")
         return result
     except Exception as e:
         logger.error(f"FB error: {e}")
 
-def share_to_facebook_group(page_post_id, text=""):
-    """Делает репост поста страницы в группу"""
+def share_to_facebook_group(page_post_id, text="", pub_imgs=None):
+    """Делает репост в группу - постит тот же контент напрямую как Страница"""
     if not FB_ENABLE_GROUP_SHARE:
         logger.info("FB group share отключен (FB_ENABLE_GROUP_SHARE=false)")
         return None
@@ -389,18 +396,14 @@ def share_to_facebook_group(page_post_id, text=""):
     if not page_post_id:
         return None
     try:
-        # Формируем ссылку на пост страницы
-        # page_post_id бывает вида 568226286376483_123456789 или просто ID фото
+        # Формируем ссылку на пост страницы для логов
         if "_" in str(page_post_id):
-            # Это feed пост: PAGEID_POSTID
             pid = str(page_post_id).split("_")[1]
             post_link = f"https://www.facebook.com/{FB_PAGE_ID}/posts/{pid}"
         else:
-            # Фото или отдельный ID
             post_link = f"https://www.facebook.com/{page_post_id}"
 
-        # Твоя страница уже постит в группу -> приоритет Page Token (страница как участник группы)
-        # Если Page Token не сработает, пробуем User Token
+        # Приоритет Page Token - твоя страница уже постит в группу
         tokens_to_try = []
         if FB_PAGE_TOKEN:
             tokens_to_try.append(("Page", FB_PAGE_TOKEN))
@@ -411,38 +414,88 @@ def share_to_facebook_group(page_post_id, text=""):
             logger.warning("Нет токена для поста в группу")
             return None
 
-        url = f"https://graph.facebook.com/v20.0/{FB_GROUP_ID}/feed"
-
+        img_list = pub_imgs or []
+        
         for token_name, token in tokens_to_try:
             try:
-                # Вариант 1: репост ссылкой на пост страницы
+                # === Способ 1: Постим напрямую фото в группу (самый надежный) ===
+                # Если есть фото, пробуем запостить как фото в группу
+                if img_list and len(img_list) == 1:
+                    url = f"https://graph.facebook.com/v20.0/{FB_GROUP_ID}/photos"
+                    data = {
+                        "caption": text[:900] if text else "",
+                        "url": img_list[0],
+                        "access_token": token
+                    }
+                    r = requests.post(url, data=data, timeout=30)
+                    logger.info(f"FB GROUP SHARE [{token_name}] PHOTO direct: {r.status_code} {r.text[:600]}")
+                    if r.status_code == 200 and r.json().get("id"):
+                        logger.info(f"✅ Пост в группу {FB_GROUP_ID} как фото успешен [{token_name}]: {r.json().get('id')} (из {post_link})")
+                        return r.json()
+                
+                # === Способ 2: Multi-photo в группу через unpublished (как на страницу) ===
+                if img_list and len(img_list) > 1:
+                    logger.info(f"FB GROUP: пробуем {len(img_list)} фото в группу {FB_GROUP_ID}")
+                    media_ids = []
+                    for img_url in img_list[:4]:  # в группах часто лимит 4
+                        try:
+                            up_url = f"https://graph.facebook.com/v20.0/{FB_GROUP_ID}/photos"
+                            up_data = {"url": img_url, "published": False, "temporary": True, "access_token": token}
+                            ur = requests.post(up_url, data=up_data, timeout=30)
+                            logger.info(f"FB GROUP unpublished [{token_name}]: {ur.text[:400]}")
+                            fid = ur.json().get("id")
+                            if fid:
+                                media_ids.append(fid)
+                        except Exception as e:
+                            logger.error(f"FB GROUP unpublished error: {e}")
+                        time.sleep(0.5)
+                    
+                    if len(media_ids) >= 2:
+                        feed_url = f"https://graph.facebook.com/v20.0/{FB_GROUP_ID}/feed"
+                        feed_data = {"message": text[:900] if text else "", "access_token": token}
+                        for i, mid in enumerate(media_ids):
+                            feed_data[f"attached_media[{i}]"] = f'{{"media_fbid":"{mid}"}}'
+                        fr = requests.post(feed_url, data=feed_data, timeout=30)
+                        logger.info(f"FB GROUP multi [{token_name}]: {fr.status_code} {fr.text[:600]}")
+                        if fr.status_code == 200 and fr.json().get("id"):
+                            logger.info(f"✅ Multi-photo в группу {FB_GROUP_ID} успешен [{token_name}]")
+                            return fr.json()
+                
+                # === Способ 3: Репост ссылкой (старый метод) ===
+                url = f"https://graph.facebook.com/v20.0/{FB_GROUP_ID}/feed"
                 data = {
                     "link": post_link,
                     "message": text[:900] if text else "",
                     "access_token": token
                 }
                 r = requests.post(url, data=data, timeout=30)
-                logger.info(f"FB GROUP SHARE [{token_name}] link: {r.status_code} {r.text[:600]}")
+                logger.info(f"FB GROUP SHARE [{token_name}] link: {r.status_code} {r.text[:800]}")
                 if r.status_code == 200 and r.json().get("id"):
-                    logger.info(f"✅ Репост в группу {FB_GROUP_ID} успешен как {token_name}: {r.json().get('id')}")
+                    logger.info(f"✅ Репост в группу {FB_GROUP_ID} как ссылка успешен [{token_name}]: {r.json().get('id')}")
                     return r.json()
 
-                # Вариант 2: если link не прошел, пробуем просто сообщением с ссылкой в тексте
+                # === Способ 4: Просто текст + ссылка ===
                 if r.status_code != 200:
                     data2 = {
                         "message": f"{text[:700]}\n\n{post_link}" if text else post_link,
                         "access_token": token
                     }
                     r2 = requests.post(url, data=data2, timeout=30)
-                    logger.info(f"FB GROUP SHARE [{token_name}] message fallback: {r2.status_code} {r2.text[:600]}")
+                    logger.info(f"FB GROUP SHARE [{token_name}] text fallback: {r2.status_code} {r2.text[:800]}")
                     if r2.status_code == 200 and r2.json().get("id"):
-                        logger.info(f"✅ Репост в группу {FB_GROUP_ID} (message) успешен как {token_name}")
+                        logger.info(f"✅ Текст в группу {FB_GROUP_ID} успешен [{token_name}]")
                         return r2.json()
+                    
+                    # Логируем точную ошибку FB для диагностики
+                    err_text = r.text + " | " + r2.text
+                    if "200" in err_text or "permission" in err_text.lower() or "unsupported" in err_text.lower():
+                        logger.error(f"❌ FB GROUP API ERROR [{token_name}]: {err_text[:1000]} - нужно App Review для Groups API")
+                        
             except Exception as e:
-                logger.error(f"FB GROUP SHARE [{token_name}] error: {e}")
+                logger.error(f"FB GROUP SHARE [{token_name}] exception: {e}")
                 continue
 
-        logger.warning(f"FB Group API не дал запостить. Пост {post_link} проверь вручную. Убедись что Страница добавлена в группу как участник и имеет право постить.")
+        logger.warning(f"⚠️ FB Group API не дал запостить в {FB_GROUP_ID}. Пост {post_link}. Проверь: 1) Страница админ группы? 2) В настройках группы разрешено Страницам постить? 3) Приложение прошло App Review для Groups API? С 2024 FB требует одобрения.")
         return None
     except Exception as e:
         logger.error(f"FB group share exception: {e}")
