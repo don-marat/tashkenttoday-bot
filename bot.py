@@ -596,6 +596,13 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
         save_posted_id(mid)  # помечаем как обработанный чтобы не копить
         return
 
+    def get_full_tg_url(file_path):
+        if not file_path:
+            return None
+        if file_path.startswith("http"):
+            return file_path
+        return f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
+
     # Для видео - без ссылки, для фото/текста - с ссылкой
     fb_text = format_text_facebook(raw_text, mid, with_link=not is_video)
     th_text = format_text_threads(raw_text, mid, with_link=not is_video)
@@ -603,17 +610,21 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
     pub_img = None
     pub_video = None
     if post.photo:
-        file = await post.photo[-1].get_file()
-        tg_img = file.file_path
-        pub_img = upload_to_public_host(tg_img, "image.jpg", "image/jpeg")
+        try:
+            file = await post.photo[-1].get_file()
+            tg_img = get_full_tg_url(file.file_path)
+            if tg_img:
+                pub_img = upload_to_public_host(tg_img, "image.jpg", "image/jpeg")
+            logger.info(f"Фото TG url: {tg_img[:100] if tg_img else 'None'} -> public: {bool(pub_img)}")
+        except Exception as e:
+            logger.error(f"Photo handling error: {e}")
     elif post.video and not DISABLE_VIDEO:
         try:
             file = await post.video.get_file()
-            tg_file_url = file.file_path
-            if tg_file_url and not tg_file_url.startswith("http"):
-                tg_file_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{tg_file_url}"
-            logger.info(f"Video TG url: {tg_file_url[:100]}")
-            pub_video = upload_to_public_host(tg_file_url, "video.mp4", "video/mp4")
+            tg_file_url = get_full_tg_url(file.file_path)
+            logger.info(f"Video TG url: {tg_file_url[:100] if tg_file_url else 'None'}")
+            if tg_file_url:
+                pub_video = upload_to_public_host(tg_file_url, "video.mp4", "video/mp4")
             tg_img = tg_file_url
         except Exception as e:
             logger.error(f"Video handling error: {e}")
@@ -656,21 +667,29 @@ async def process_album_job(context: ContextTypes.DEFAULT_TYPE):
             try:
                 file = await p.photo[-1].get_file()
                 tg_url = file.file_path
+                if tg_url and not tg_url.startswith("http"):
+                    tg_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{tg_url}"
+                logger.info(f"Альбом фото TG url: {tg_url[:100]}")
                 pub = upload_to_public_host(tg_url, "image.jpg", "image/jpeg")
                 if pub:
                     pub_imgs.append(pub)
+                    logger.info(f"Альбом фото uploaded: {pub[:80]}")
+                else:
+                    logger.warning(f"Альбом фото не удалось загрузить в public host")
             except Exception as e:
                 logger.error(f"Album photo error: {e}")
     if not pub_imgs:
-        logger.warning(f"Альбом {mg_id}: не удалось загрузить фото")
+        logger.warning(f"Альбом {mg_id}: не удалось загрузить фото (все {len(posts)} попыток failed)")
         return
     fb_text = format_text_facebook(raw_text, mid, with_link=True)
     th_text = format_text_threads(raw_text, mid, with_link=True)
-    logger.info(f"Альбом {mg_id}: FB пост с 1 фото из {len(pub_imgs)}, Threads карусель {len(pub_imgs)} фото")
+    logger.info(f"Альбом {mg_id}: FB пост с 1 фото из {len(pub_imgs)}, Threads карусель {len(pub_imgs)} фото | pub_imgs={pub_imgs[:2]}")
     fb_res = post_to_facebook(fb_text, pub_imgs=pub_imgs)
     th_res = post_to_threads(th_text, pub_imgs=pub_imgs)
     if fb_res or th_res:
         save_posted_id(mid)
+    else:
+        logger.warning(f"Альбом {mg_id}: FB и Threads оба failed, ID не сохраняем")
 
 async def auto_refresh_job(context: ContextTypes.DEFAULT_TYPE):
     logger.info("⏰ Авто-проверка FB + Threads...")
