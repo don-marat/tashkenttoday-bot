@@ -80,6 +80,8 @@ FB_PAGE_TOKEN_ENV = os.getenv("FB_PAGE_TOKEN")
 FB_USER_TOKEN_ENV = os.getenv("FB_USER_LONG_TOKEN") or os.getenv("FB_USER_TOKEN")
 FB_APP_ID = os.getenv("FB_APP_ID", "1301269625209688")
 FB_APP_SECRET = os.getenv("FB_APP_SECRET")
+FB_GROUP_ID = os.getenv("FB_GROUP_ID", "1386345025841083")  # ID группы Новости Ташкента
+FB_ENABLE_GROUP_SHARE = os.getenv("FB_ENABLE_GROUP_SHARE", "true").lower() in ("1", "true", "yes")
 THREADS_USER_ID = os.getenv("THREADS_USER_ID", "27092394720363294")
 THREADS_TOKEN_ENV = os.getenv("THREADS_TOKEN")
 SOURCE_CHANNEL = os.getenv("SOURCE_CHANNEL", "@tashkenttodayuz")
@@ -365,9 +367,86 @@ def post_to_facebook(text, tg_img=None, pub_img=None, video_url=None, pub_imgs=N
                 data["access_token"] = FB_PAGE_TOKEN
                 r = requests.post(url, data=data, timeout=30)
                 logger.info(f"FB RETRY: {r.status_code} {r.text[:500]}")
-        return r.json()
+        result = r.json()
+        # === Репост в группу ===
+        if result.get("id") or result.get("post_id"):
+            try:
+                share_to_facebook_group(result.get("id") or result.get("post_id"), text)
+            except Exception as e:
+                logger.error(f"FB group share error: {e}")
+        return result
     except Exception as e:
         logger.error(f"FB error: {e}")
+
+def share_to_facebook_group(page_post_id, text=""):
+    """Делает репост поста страницы в группу"""
+    if not FB_ENABLE_GROUP_SHARE:
+        logger.info("FB group share отключен (FB_ENABLE_GROUP_SHARE=false)")
+        return None
+    if not FB_GROUP_ID:
+        logger.info("FB_GROUP_ID не задан, репост в группу пропускаем")
+        return None
+    if not page_post_id:
+        return None
+    try:
+        # Формируем ссылку на пост страницы
+        # page_post_id бывает вида 568226286376483_123456789 или просто ID фото
+        if "_" in str(page_post_id):
+            # Это feed пост: PAGEID_POSTID
+            pid = str(page_post_id).split("_")[1]
+            post_link = f"https://www.facebook.com/{FB_PAGE_ID}/posts/{pid}"
+        else:
+            # Фото или отдельный ID
+            post_link = f"https://www.facebook.com/{page_post_id}"
+
+        # Твоя страница уже постит в группу -> приоритет Page Token (страница как участник группы)
+        # Если Page Token не сработает, пробуем User Token
+        tokens_to_try = []
+        if FB_PAGE_TOKEN:
+            tokens_to_try.append(("Page", FB_PAGE_TOKEN))
+        if FB_USER_TOKEN:
+            tokens_to_try.append(("User", FB_USER_TOKEN))
+
+        if not tokens_to_try:
+            logger.warning("Нет токена для поста в группу")
+            return None
+
+        url = f"https://graph.facebook.com/v20.0/{FB_GROUP_ID}/feed"
+
+        for token_name, token in tokens_to_try:
+            try:
+                # Вариант 1: репост ссылкой на пост страницы
+                data = {
+                    "link": post_link,
+                    "message": text[:900] if text else "",
+                    "access_token": token
+                }
+                r = requests.post(url, data=data, timeout=30)
+                logger.info(f"FB GROUP SHARE [{token_name}] link: {r.status_code} {r.text[:600]}")
+                if r.status_code == 200 and r.json().get("id"):
+                    logger.info(f"✅ Репост в группу {FB_GROUP_ID} успешен как {token_name}: {r.json().get('id')}")
+                    return r.json()
+
+                # Вариант 2: если link не прошел, пробуем просто сообщением с ссылкой в тексте
+                if r.status_code != 200:
+                    data2 = {
+                        "message": f"{text[:700]}\n\n{post_link}" if text else post_link,
+                        "access_token": token
+                    }
+                    r2 = requests.post(url, data=data2, timeout=30)
+                    logger.info(f"FB GROUP SHARE [{token_name}] message fallback: {r2.status_code} {r2.text[:600]}")
+                    if r2.status_code == 200 and r2.json().get("id"):
+                        logger.info(f"✅ Репост в группу {FB_GROUP_ID} (message) успешен как {token_name}")
+                        return r2.json()
+            except Exception as e:
+                logger.error(f"FB GROUP SHARE [{token_name}] error: {e}")
+                continue
+
+        logger.warning(f"FB Group API не дал запостить. Пост {post_link} проверь вручную. Убедись что Страница добавлена в группу как участник и имеет право постить.")
+        return None
+    except Exception as e:
+        logger.error(f"FB group share exception: {e}")
+        return None
 
 def post_to_threads_carousel(text, image_urls):
     """П постит карусель в Threads (до 20 фото)"""
@@ -643,7 +722,8 @@ def main():
         logger.info("JobQueue: авто-рефреш FB+Threads каждые 24ч")
     now_t = datetime.now(TASHKENT_TZ).strftime("%H:%M")
     in_hours = is_working_hours()
-    logger.info(f"Бот запущен {SOURCE_CHANNEL} -> FB:{FB_PAGE_ID} + Threads:{THREADS_USER_ID} | Время Ташкент: {now_t} | В графике 9-20: {in_hours} | Видео: {'ВЫКЛ' if DISABLE_VIDEO else 'ВКЛ'} | Дедупликация: {len(POSTED_IDS)} ID | Пропуск после 20:00: ВКЛ | drop_pending=False")
+    group_info = f"Группа:{FB_GROUP_ID}" if FB_GROUP_ID else "Группа: ВЫКЛ"
+    logger.info(f"Бот запущен {SOURCE_CHANNEL} -> FB:{FB_PAGE_ID} + Threads:{THREADS_USER_ID} | Время Ташкент: {now_t} | В графике 9-20: {in_hours} | Видео: {'ВЫКЛ' if DISABLE_VIDEO else 'ВКЛ'} | {group_info} | Дедупликация: {len(POSTED_IDS)} ID | Пропуск после 20:00: ВКЛ | drop_pending=False")
     # drop_pending_updates=False - чтобы проверять последние посты если бот был оффлайн
     app.run_polling(allowed_updates=["channel_post"], poll_interval=60.0, timeout=50, drop_pending_updates=False, close_loop=False)
 
