@@ -616,12 +616,14 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
         txt = post.text or post.caption or ""
         if txt:
             MEDIA_GROUP_LAST_TEXT[mg_id] = (txt, post.message_id)
-        # Планируем обработку через 4 сек (чтобы собрать все фото альбома)
-        # Если уже запланировано - не дублируем
+        # Планируем обработку через 7 сек (чтобы собрать все фото альбома - Telegram шлет с задержкой)
         jobs = context.job_queue.get_jobs_by_name(f"album_{mg_id}")
         if not jobs:
-            context.job_queue.run_once(process_album_job, when=4, name=f"album_{mg_id}", data=mg_id)
-            logger.info(f"Альбом {mg_id}: собрано {len(MEDIA_GROUP_CACHE[mg_id])} фото, ждем остальные...")
+            # 7 секунд чтобы собрать все 2-10 фото
+            context.job_queue.run_once(process_album_job, when=7, name=f"album_{mg_id}", data=mg_id)
+            logger.info(f"Альбом {mg_id}: первое фото, планируем обработку через 7 сек...")
+        else:
+            logger.info(f"Альбом {mg_id}: собрано {len(MEDIA_GROUP_CACHE[mg_id])} фото, ждем...")
         return
 
     raw_text = post.text or post.caption or ""
@@ -664,18 +666,21 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
     pub_video = None
     if post.photo:
         try:
-            file = await post.photo[-1].get_file()
+            # Используем bot из контекста для надежности
+            file_id = post.photo[-1].file_id
+            file = await context.bot.get_file(file_id)
             tg_img = get_full_tg_url(file.file_path)
             if tg_img:
                 pub_img = upload_to_public_host(tg_img, "image.jpg", "image/jpeg")
-            logger.info(f"Фото TG url: {tg_img[:100] if tg_img else 'None'} -> public: {bool(pub_img)}")
+            logger.info(f"Фото TG url: {tg_img[:120] if tg_img else 'None'} -> public: {bool(pub_img)} -> {pub_img}")
         except Exception as e:
             logger.error(f"Photo handling error: {e}")
     elif post.video and not DISABLE_VIDEO:
         try:
-            file = await post.video.get_file()
+            file_id = post.video.file_id
+            file = await context.bot.get_file(file_id)
             tg_file_url = get_full_tg_url(file.file_path)
-            logger.info(f"Video TG url: {tg_file_url[:100] if tg_file_url else 'None'}")
+            logger.info(f"Video TG url: {tg_file_url[:120] if tg_file_url else 'None'}")
             if tg_file_url:
                 pub_video = upload_to_public_host(tg_file_url, "video.mp4", "video/mp4")
             tg_img = tg_file_url
@@ -692,7 +697,9 @@ async def process_album_job(context: ContextTypes.DEFAULT_TYPE):
     mg_id = context.job.data
     posts = MEDIA_GROUP_CACHE.pop(mg_id, [])
     text_info = MEDIA_GROUP_LAST_TEXT.pop(mg_id, None)
+    logger.info(f"Альбом JOB START {mg_id}: в кэше {len(posts)} фото, text_info={bool(text_info)}")
     if not posts:
+        logger.warning(f"Альбом {mg_id}: пустой кэш, пропускаем")
         return
     if not text_info:
         for p in posts:
@@ -701,7 +708,7 @@ async def process_album_job(context: ContextTypes.DEFAULT_TYPE):
                 break
     raw_text, mid = text_info if text_info else ("", posts[0].message_id)
     if not raw_text:
-        logger.info(f"Альбом {mg_id}: нет текста, пропускаем")
+        logger.info(f"Альбом {mg_id}: нет текста, пропускаем (но {len(posts)} фото было)")
         return
     # Проверка дедупликации для альбома
     if is_already_posted(mid):
@@ -713,36 +720,64 @@ async def process_album_job(context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"⏰ Альбом {mg_id} вне графика 9-20 (сейчас {now_t}), пропускаем")
         save_posted_id(mid)
         return
-    logger.info(f"Альбом {mg_id}: обрабатываем {len(posts)} фото, текст: {raw_text[:60]}...")
+    
+    logger.info(f"Альбом {mg_id}: обрабатываем {len(posts)} фото, текст: {raw_text[:80]}... mid={mid}")
+    
+    def get_full_tg_url(file_path):
+        if not file_path:
+            return None
+        if file_path.startswith("http"):
+            return file_path
+        return f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
+    
     pub_imgs = []
-    for p in posts:
+    for idx, p in enumerate(posts):
         if p.photo:
             try:
-                file = await p.photo[-1].get_file()
-                tg_url = file.file_path
-                if tg_url and not tg_url.startswith("http"):
-                    tg_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{tg_url}"
-                logger.info(f"Альбом фото TG url: {tg_url[:100]}")
-                pub = upload_to_public_host(tg_url, "image.jpg", "image/jpeg")
+                # Используем bot из job context - надежнее чем p.get_file()
+                file_id = p.photo[-1].file_id
+                file = await context.bot.get_file(file_id)
+                tg_url = get_full_tg_url(file.file_path)
+                logger.info(f"Альбом {mg_id} фото {idx+1}/{len(posts)} TG url: {tg_url[:120] if tg_url else 'None'}")
+                if not tg_url:
+                    continue
+                pub = upload_to_public_host(tg_url, f"image_{idx}.jpg", "image/jpeg")
                 if pub:
                     pub_imgs.append(pub)
-                    logger.info(f"Альбом фото uploaded: {pub[:80]}")
+                    logger.info(f"Альбом {mg_id} фото {idx+1} uploaded OK: {pub[:80]}")
                 else:
-                    logger.warning(f"Альбом фото не удалось загрузить в public host")
+                    logger.warning(f"Альбом {mg_id} фото {idx+1} не удалось загрузить в public host (catbox/0x0)")
             except Exception as e:
-                logger.error(f"Album photo error: {e}")
+                logger.error(f"Альбом {mg_id} фото {idx+1} error: {e}", exc_info=True)
+    
     if not pub_imgs:
-        logger.warning(f"Альбом {mg_id}: не удалось загрузить фото (все {len(posts)} попыток failed)")
+        logger.error(f"Альбом {mg_id}: не удалось загрузить НИ ОДНОГО фото из {len(posts)}, отменяем пост")
+        # Не сохраняем ID чтобы можно было ретрайнуть
         return
+    
     fb_text = format_text_facebook(raw_text, mid, with_link=True)
     th_text = format_text_threads(raw_text, mid, with_link=True)
-    logger.info(f"Альбом {mg_id}: FB пост с 1 фото из {len(pub_imgs)}, Threads карусель {len(pub_imgs)} фото | pub_imgs={pub_imgs[:2]}")
-    fb_res = post_to_facebook(fb_text, pub_imgs=pub_imgs)
-    th_res = post_to_threads(th_text, pub_imgs=pub_imgs)
+    logger.info(f"Альбом {mg_id}: ГОТОВ FB {len(pub_imgs)} фото + Threads карусель {len(pub_imgs)} | pub_imgs={pub_imgs[:2]}")
+    
+    try:
+        fb_res = post_to_facebook(fb_text, pub_imgs=pub_imgs)
+        logger.info(f"Альбом {mg_id} FB result: {str(fb_res)[:500]}")
+    except Exception as e:
+        logger.error(f"Альбом {mg_id} FB error: {e}", exc_info=True)
+        fb_res = None
+    
+    try:
+        th_res = post_to_threads(th_text, pub_imgs=pub_imgs)
+        logger.info(f"Альбом {mg_id} Threads result: {str(th_res)[:500]}")
+    except Exception as e:
+        logger.error(f"Альбом {mg_id} Threads error: {e}", exc_info=True)
+        th_res = None
+    
     if fb_res or th_res:
         save_posted_id(mid)
+        logger.info(f"Альбом {mg_id} УСПЕХ сохранен ID {mid}")
     else:
-        logger.warning(f"Альбом {mg_id}: FB и Threads оба failed, ID не сохраняем")
+        logger.warning(f"Альбом {mg_id}: FB и Threads оба failed, ID не сохраняем, можно ретрайнуть")
 
 async def auto_refresh_job(context: ContextTypes.DEFAULT_TYPE):
     logger.info("⏰ Авто-проверка FB + Threads...")
