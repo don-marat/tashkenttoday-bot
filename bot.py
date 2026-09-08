@@ -1,8 +1,8 @@
+
 import os
 import logging
 import requests
 import time
-import asyncio
 from collections import defaultdict
 from telegram import Update
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
@@ -19,8 +19,9 @@ WORK_START_HOUR = int(os.getenv("WORK_START_HOUR", "9"))
 WORK_END_HOUR = int(os.getenv("WORK_END_HOUR", "20"))
 TASHKENT_TZ = timezone(timedelta(hours=5))
 DISABLE_VIDEO = os.getenv("DISABLE_VIDEO", "true").lower() in ("1", "true", "yes")
+THREADS_DISABLE_VIDEO = os.getenv("THREADS_DISABLE_VIDEO", "true").lower() in ("1", "true", "yes")
 
-# ВКЛ/ВЫКЛ платформ - можно отключать в Railway Variables
+# === Переключатели платформ ===
 FB_ENABLED = os.getenv("FB_ENABLED", "true").lower() in ("1", "true", "yes")
 FB_PAGE_ENABLED = os.getenv("FB_PAGE_ENABLED", "true").lower() in ("1", "true", "yes")
 THREADS_ENABLED = os.getenv("THREADS_ENABLED", "true").lower() in ("1", "true", "yes")
@@ -42,21 +43,19 @@ def load_posted_ids():
         if os.path.exists(POSTED_FILE):
             with open(POSTED_FILE, "r") as f:
                 POSTED_IDS = set(json.load(f))
-                logger.info(f"Загружено {len(POSTED_IDS)} ID из {POSTED_FILE}")
+                logger.info(f"Загружено {len(POSTED_IDS)} ID")
     except Exception as e:
-        logger.error(f"load_posted_ids: {e}")
         POSTED_IDS = set()
 
 def save_posted_id(mid):
     try:
         POSTED_IDS.add(mid)
         to_save = sorted(list(POSTED_IDS))[-1000:]
-        _dir = os.path.dirname(POSTED_FILE)
-        if _dir and not os.path.exists(_dir):
-            os.makedirs(_dir, exist_ok=True)
+        d = os.path.dirname(POSTED_FILE)
+        if d and not os.path.exists(d):
+            os.makedirs(d, exist_ok=True)
         with open(POSTED_FILE, "w") as f:
             json.dump(to_save, f)
-        logger.info(f"ID {mid} сохранен, всего {len(POSTED_IDS)}")
     except Exception as e:
         logger.error(f"save_posted_id: {e}")
 
@@ -90,17 +89,16 @@ def load_token(path, env_val):
                 if t and len(t) > 20:
                     logger.info(f"Token loaded from {path}")
                     return t
-    except Exception as e:
-        logger.error(f"load {path}: {e}")
+    except:
+        pass
     return env_val
 
 def save_token(path, token):
     try:
         with open(path, "w") as f:
             f.write(token)
-        logger.info(f"Token saved to {path}")
-    except Exception as e:
-        logger.error(f"save {path}: {e}")
+    except:
+        pass
 
 THREADS_TOKEN = load_token(THREADS_TOKEN_FILE, THREADS_TOKEN_ENV)
 FB_PAGE_TOKEN = load_token(FB_PAGE_TOKEN_FILE, FB_PAGE_TOKEN_ENV)
@@ -114,10 +112,8 @@ def railway_update(name, value):
         vars_ = {"input": {"projectId": RAILWAY_PROJECT_ID, "environmentId": RAILWAY_ENV_ID, "serviceId": RAILWAY_SERVICE_ID, "name": name, "value": value}}
         headers = {"Authorization": f"Bearer {RAILWAY_API_TOKEN}", "Content-Type": "application/json"}
         r = requests.post("https://backboard.railway.app/graphql/v2", json={"query": q, "variables": vars_}, headers=headers, timeout=20)
-        logger.info(f"Railway {name}: {r.status_code}")
         return r.status_code == 200
-    except Exception as e:
-        logger.error(f"Railway {name} error: {e}")
+    except:
         return False
 
 def check_fb_expiry():
@@ -147,12 +143,11 @@ def refresh_fb_page_token():
             FB_PAGE_TOKEN = new_t
             save_token(FB_PAGE_TOKEN_FILE, new_t)
             railway_update("FB_PAGE_TOKEN", new_t)
-            logger.info(f"FB Page token refreshed")
+            logger.info("✅ FB Page token refreshed")
             return new_t
-        return None
     except Exception as e:
         logger.error(f"refresh_fb_page error: {e}")
-        return None
+    return None
 
 def check_threads_expiry():
     if THREADS_TOKEN:
@@ -165,17 +160,17 @@ def refresh_threads_token():
     try:
         url = f"https://graph.threads.net/refresh_access_token?grant_type=th_refresh_token&access_token={THREADS_TOKEN}"
         r = requests.get(url, timeout=20)
+        logger.info(f"Threads refresh: {r.text[:500]}")
         new_t = r.json().get("access_token")
         if new_t:
             THREADS_TOKEN = new_t
             save_token(THREADS_TOKEN_FILE, new_t)
             railway_update("THREADS_TOKEN", new_t)
-            logger.info(f"Threads refreshed")
+            logger.info("✅ Threads refreshed")
             return new_t
-        return None
     except Exception as e:
         logger.error(f"refresh_threads error: {e}")
-        return None
+    return None
 
 def format_text_facebook(text, mid, with_link=True):
     text = text.strip()
@@ -193,32 +188,35 @@ def format_text_threads(text, mid, with_link=True):
     text = text.strip()
     if len(text) > 480:
         text = text[:480] + "..."
-    if with_link and len(text) < 400:
-        link = f" t.me/{SOURCE_CHANNEL.replace('@','')}/{mid}"
-        if len(text) + len(link) <= 500:
-            text = text + f"\n\n{link}"
+    if with_link and len(text) < 380:
+        link = f"https://t.me/{SOURCE_CHANNEL.replace('@','')}/{mid}"
+        if len(text) + len(link) + 4 <= 500:
+            text = f"{text}\n\nПодробнее: {link}"
     return text
 
 def upload_to_public_host(tg_url, filename, mime):
     try:
         r = requests.get(tg_url, timeout=60)
         if r.status_code != 200 or len(r.content) < 100:
+            logger.warning(f"TG download failed {r.status_code} len={len(r.content) if r.content else 0}")
             return None
         data = r.content
         try:
             files = {"fileToUpload": (filename, data, mime)}
             cr = requests.post("https://catbox.moe/user/api.php", data={"reqtype": "fileupload"}, files=files, timeout=30)
             if cr.status_code == 200 and cr.text.startswith("http"):
+                logger.info(f"catbox OK: {cr.text[:80]}")
                 return cr.text.strip()
-        except:
-            pass
+        except Exception as e:
+            logger.warning(f"catbox err: {e}")
         try:
             files = {"file": (filename, data, mime)}
             r2 = requests.post("https://0x0.st", files=files, timeout=30)
             if r2.status_code == 200 and r2.text.startswith("http"):
+                logger.info(f"0x0.st OK: {r2.text[:80]}")
                 return r2.text.strip()
-        except:
-            pass
+        except Exception as e:
+            logger.warning(f"0x0 err: {e}")
         return None
     except Exception as e:
         logger.error(f"upload error: {e}")
@@ -226,7 +224,7 @@ def upload_to_public_host(tg_url, filename, mime):
 
 def post_to_facebook(text, tg_img=None, pub_img=None, video_url=None, pub_imgs=None):
     if not is_fb_enabled():
-        logger.info(f"FB Page отключен FB_ENABLED={FB_ENABLED} FB_PAGE_ENABLED={FB_PAGE_ENABLED}")
+        logger.info(f"FB отключен FB_ENABLED={FB_ENABLED} FB_PAGE_ENABLED={FB_PAGE_ENABLED}")
         return None
     if not FB_PAGE_TOKEN or not FB_PAGE_ID:
         logger.warning("FB token/ID не заданы")
@@ -236,9 +234,8 @@ def post_to_facebook(text, tg_img=None, pub_img=None, video_url=None, pub_imgs=N
             url = f"https://graph.facebook.com/v20.0/{FB_PAGE_ID}/videos"
             data = {"description": text, "file_url": video_url, "access_token": FB_PAGE_TOKEN}
             r = requests.post(url, data=data, timeout=120)
-            logger.info(f"FB VIDEO: {r.status_code} {r.text[:500]}")
+            logger.info(f"FB VIDEO: {r.status_code} {r.text[:600]}")
             return r.json()
-
         img_list = pub_imgs or ([pub_img or tg_img] if (pub_img or tg_img) else [])
         if len(img_list) > 1:
             logger.info(f"FB ALBUM: {len(img_list)} фото")
@@ -251,8 +248,9 @@ def post_to_facebook(text, tg_img=None, pub_img=None, video_url=None, pub_imgs=N
                     fid = ur.json().get("id")
                     if fid:
                         media_ids.append(fid)
+                    logger.info(f"FB unpublished: {ur.text[:300]}")
                 except Exception as e:
-                    logger.error(f"FB unpublished error: {e}")
+                    logger.error(f"FB unpublished err: {e}")
                 time.sleep(0.5)
             if len(media_ids) >= 2:
                 try:
@@ -261,11 +259,11 @@ def post_to_facebook(text, tg_img=None, pub_img=None, video_url=None, pub_imgs=N
                     for i, mid in enumerate(media_ids):
                         feed_data[f"attached_media[{i}]"] = f'{{"media_fbid":"{mid}"}}'
                     fr = requests.post(feed_url, data=feed_data, timeout=30)
-                    logger.info(f"FB multi-photo: {fr.status_code} {fr.text[:500]}")
+                    logger.info(f"FB multi: {fr.status_code} {fr.text[:600]}")
                     if fr.status_code == 200 and fr.json().get("id"):
                         return fr.json()
                 except Exception as e:
-                    logger.error(f"FB multi error: {e}")
+                    logger.error(f"FB multi err: {e}")
 
         img_url = img_list[0] if img_list else None
         if img_url:
@@ -275,11 +273,12 @@ def post_to_facebook(text, tg_img=None, pub_img=None, video_url=None, pub_imgs=N
             url = f"https://graph.facebook.com/v20.0/{FB_PAGE_ID}/feed"
             data = {"message": text, "access_token": FB_PAGE_TOKEN}
         r = requests.post(url, data=data, timeout=30)
-        logger.info(f"FB OK: {r.status_code} {r.text[:500]}")
-        if any(x in r.text for x in ["Session has expired", "Error validating access token"]):
+        logger.info(f"FB OK: {r.status_code} {r.text[:600]}")
+        if "Session has expired" in r.text or "Error validating access token" in r.text:
             if refresh_fb_page_token():
                 data["access_token"] = FB_PAGE_TOKEN
                 r = requests.post(url, data=data, timeout=30)
+                logger.info(f"FB RETRY: {r.status_code} {r.text[:600]}")
         return r.json()
     except Exception as e:
         logger.error(f"FB error: {e}", exc_info=True)
@@ -287,81 +286,140 @@ def post_to_facebook(text, tg_img=None, pub_img=None, video_url=None, pub_imgs=N
 
 def post_to_threads_carousel(text, image_urls):
     if not THREADS_ENABLED:
+        logger.info("Threads отключен")
+        return None
+    if not THREADS_TOKEN:
+        logger.warning("Threads token нет")
         return None
     try:
         create_url = f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads"
         short_text = text[:480] if len(text) > 480 else text
         item_ids = []
-        for img_url in image_urls[:10]:
+        for idx, img_url in enumerate(image_urls[:10]):
             payload = {"media_type": "IMAGE", "image_url": img_url, "is_carousel_item": True, "access_token": THREADS_TOKEN}
             r = requests.post(create_url, data=payload, timeout=30)
-            iid = r.json().get("id")
+            logger.info(f"Threads CAROUSEL ITEM {idx+1}: {r.text[:500]}")
+            j = r.json()
+            iid = j.get("id")
             if iid:
                 item_ids.append(iid)
-            time.sleep(1)
-        if not item_ids:
+            else:
+                logger.warning(f"Threads carousel item failed: {r.text[:500]}")
+            time.sleep(1.2)
+        if len(item_ids) < 2:
+            logger.warning(f"Threads carousel: только {len(item_ids)} item_id, не хватает для карусели")
             return None
         payload = {"media_type": "CAROUSEL", "text": short_text, "children": ",".join(item_ids), "access_token": THREADS_TOKEN}
         r = requests.post(create_url, data=payload, timeout=30)
-        cid = r.json().get("id")
+        logger.info(f"Threads CAROUSEL CREATE: {r.text[:800]}")
+        j = r.json()
+        cid = j.get("id")
         if not cid:
+            logger.error(f"Threads carousel create failed: {r.text[:800]}")
             return None
-        time.sleep(6)
+        time.sleep(7)
         pub_url = f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads_publish"
         r2 = requests.post(pub_url, data={"creation_id": cid, "access_token": THREADS_TOKEN}, timeout=60)
+        logger.info(f"Threads publish CAROUSEL: {r2.status_code} {r2.text[:800]}")
         if r2.status_code == 200 and r2.json().get("id"):
+            logger.info(f"✅ Threads carousel published: {r2.json().get('id')}")
             return r2.json()
-        time.sleep(10)
+        # retry - Threads иногда требует больше времени
+        time.sleep(12)
         r2 = requests.post(pub_url, data={"creation_id": cid, "access_token": THREADS_TOKEN}, timeout=60)
+        logger.info(f"Threads publish CAROUSEL retry: {r2.status_code} {r2.text[:800]}")
         return r2.json()
     except Exception as e:
         logger.error(f"Threads carousel error: {e}", exc_info=True)
         return None
 
 def post_to_threads(text, tg_img=None, pub_img=None, video_url=None, pub_imgs=None):
+    if THREADS_DISABLE_VIDEO and video_url:
+        logger.info("🎬 Threads видео отключено (THREADS_DISABLE_VIDEO=true) - пропускаем видео в Threads")
+        return None
     if not THREADS_ENABLED:
         logger.info("Threads отключен THREADS_ENABLED=false")
         return None
     if not THREADS_TOKEN or not THREADS_USER_ID:
+        logger.warning("Threads token/ID не заданы")
         return None
     try:
         create_url = f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads"
         short_text = text[:480] if len(text) > 480 else text
+
         if video_url:
+            logger.info(f"Threads VIDEO start: {video_url[:80]}")
             payload = {"media_type": "VIDEO", "text": short_text, "video_url": video_url, "access_token": THREADS_TOKEN}
-            r = requests.post(create_url, data=payload, timeout=60)
-            cid = r.json().get("id")
+            r = requests.post(create_url, data=payload, timeout=90)
+            logger.info(f"Threads VIDEO CREATE: {r.status_code} {r.text[:800]}")
+            j = r.json()
+            cid = j.get("id")
             if not cid:
-                return None
-            time.sleep(10)
+                if "Session has expired" in r.text or "Error validating access token" in r.text:
+                    if refresh_threads_token():
+                        payload["access_token"] = THREADS_TOKEN
+                        r = requests.post(create_url, data=payload, timeout=90)
+                        cid = r.json().get("id")
+                if not cid:
+                    logger.error(f"Threads video create failed: {r.text[:800]}")
+                    return None
+            time.sleep(12)
             pub_url = f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads_publish"
-            r2 = requests.post(pub_url, data={"creation_id": cid, "access_token": THREADS_TOKEN}, timeout=60)
+            r2 = requests.post(pub_url, data={"creation_id": cid, "access_token": THREADS_TOKEN}, timeout=90)
+            logger.info(f"Threads publish VIDEO: {r2.status_code} {r2.text[:800]}")
+            if r2.status_code == 200 and r2.json().get("id"):
+                return r2.json()
+            time.sleep(18)
+            r2 = requests.post(pub_url, data={"creation_id": cid, "access_token": THREADS_TOKEN}, timeout=90)
+            logger.info(f"Threads publish VIDEO retry: {r2.status_code} {r2.text[:800]}")
             return r2.json()
+
         img_list = pub_imgs or ([pub_img or tg_img] if (pub_img or tg_img) else [])
         if len(img_list) > 1:
+            logger.info(f"Threads ALBUM: {len(img_list)} фото -> карусель")
             res = post_to_threads_carousel(text, img_list)
-            if res:
+            if res and res.get("id"):
                 return res
+            logger.warning("Threads карусель не удалась, fallback на 1 фото")
             img_list = [img_list[0]]
+
         img_to_use = img_list[0] if img_list else None
         if img_to_use:
             payload = {"media_type": "IMAGE", "text": short_text, "image_url": img_to_use, "access_token": THREADS_TOKEN}
-            r = requests.post(create_url, data=payload, timeout=30)
-            cid = r.json().get("id")
+            r = requests.post(create_url, data=payload, timeout=40)
+            logger.info(f"Threads IMAGE CREATE: {r.status_code} {r.text[:600]}")
+            j = r.json()
+            cid = j.get("id")
             if cid:
-                time.sleep(4)
+                time.sleep(5)
                 pub_url = f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads_publish"
-                r2 = requests.post(pub_url, data={"creation_id": cid, "access_token": THREADS_TOKEN}, timeout=30)
+                r2 = requests.post(pub_url, data={"creation_id": cid, "access_token": THREADS_TOKEN}, timeout=40)
+                logger.info(f"Threads publish IMAGE: {r2.status_code} {r2.text[:600]}")
                 if r2.status_code == 200 and r2.json().get("id"):
+                    logger.info(f"✅ Threads image published")
                     return r2.json()
+                else:
+                    logger.warning(f"Threads image publish failed, fallback to text: {r2.text[:600]}")
+
+        # Fallback TEXT
         payload = {"media_type": "TEXT", "text": short_text, "access_token": THREADS_TOKEN}
         r = requests.post(create_url, data=payload, timeout=30)
-        cid = r.json().get("id")
+        logger.info(f"Threads TEXT CREATE: {r.status_code} {r.text[:600]}")
+        j = r.json()
+        cid = j.get("id")
         if not cid:
-            return None
-        time.sleep(2)
+            if "Session has expired" in r.text or "Error validating access token" in r.text:
+                if refresh_threads_token():
+                    payload["access_token"] = THREADS_TOKEN
+                    r = requests.post(create_url, data=payload, timeout=30)
+                    cid = r.json().get("id")
+            if not cid:
+                logger.error(f"Threads text create failed: {r.text[:600]}")
+                return None
+        time.sleep(2.5)
         pub_url = f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads_publish"
         r2 = requests.post(pub_url, data={"creation_id": cid, "access_token": THREADS_TOKEN}, timeout=30)
+        logger.info(f"Threads publish TEXT: {r2.status_code} {r2.text[:600]}")
         return r2.json()
     except Exception as e:
         logger.error(f"Threads error: {e}", exc_info=True)
@@ -421,7 +479,7 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
             tg_img = get_full_tg_url(file.file_path)
             if tg_img:
                 pub_img = upload_to_public_host(tg_img, "image.jpg", "image/jpeg")
-            logger.info(f"Фото -> public: {bool(pub_img)}")
+            logger.info(f"Фото -> public: {bool(pub_img)} {pub_img}")
         except Exception as e:
             logger.error(f"Photo error: {e}", exc_info=True)
     elif post.video and not DISABLE_VIDEO:
@@ -438,16 +496,24 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
     fb_res = None
     th_res = None
     if is_fb_enabled():
-        fb_res = post_to_facebook(fb_text, tg_img, pub_img, video_url=pub_video)
+        # Видео на FB постим только если DISABLE_VIDEO=false
+        if is_video and DISABLE_VIDEO:
+            logger.info("FB видео пропуск из-за DISABLE_VIDEO")
+        else:
+            fb_res = post_to_facebook(fb_text, tg_img, pub_img, video_url=pub_video)
     else:
         logger.info(f"FB Page ВЫКЛЮЧЕН FB_ENABLED={FB_ENABLED} FB_PAGE_ENABLED={FB_PAGE_ENABLED}")
 
     if THREADS_ENABLED:
-        th_res = post_to_threads(th_text, tg_img, pub_img, video_url=pub_video)
+        if is_video and THREADS_DISABLE_VIDEO:
+            logger.info(f"🎬 Threads видео пропуск (THREADS_DISABLE_VIDEO=true) пост {mid} - в Threads не постим видео")
+            th_res = None
+        else:
+            th_res = post_to_threads(th_text, tg_img, pub_img, video_url=pub_video)
     else:
-        logger.info("Threads ВЫКЛЮЧЕН")
+        logger.info("Threads ВЫКЛЮЧЕН THREADS_ENABLED=false")
 
-    if fb_res or th_res or (not is_fb_enabled() and not THREADS_ENABLED):
+    if fb_res or th_res or (not is_fb_enabled() and not THREADS_ENABLED) or (is_video and THREADS_DISABLE_VIDEO and not is_fb_enabled()):
         save_posted_id(mid)
 
 async def process_album_job(context: ContextTypes.DEFAULT_TYPE):
@@ -490,10 +556,12 @@ async def process_album_job(context: ContextTypes.DEFAULT_TYPE):
                 pub = upload_to_public_host(tg_url, f"image_{idx}.jpg", "image/jpeg")
                 if pub:
                     pub_imgs.append(pub)
+                    logger.info(f"Альбом {mg_id} фото {idx+1} OK")
             except Exception as e:
                 logger.error(f"Album error: {e}", exc_info=True)
 
     if not pub_imgs:
+        logger.error(f"Альбом {mg_id}: нет фото")
         return
 
     fb_text = format_text_facebook(raw_text, mid, with_link=True)
@@ -508,6 +576,7 @@ async def process_album_job(context: ContextTypes.DEFAULT_TYPE):
 
     if fb_res or th_res:
         save_posted_id(mid)
+        logger.info(f"Альбом {mg_id} УСПЕХ")
 
 async def auto_refresh_job(context: ContextTypes.DEFAULT_TYPE):
     logger.info("Авто-проверка токенов...")
@@ -547,7 +616,7 @@ def main():
     if app.job_queue:
         app.job_queue.run_repeating(auto_refresh_job, interval=24*60*60, first=60)
     now_t = datetime.now(TASHKENT_TZ).strftime("%H:%M")
-    logger.info(f"Бот запущен {SOURCE_CHANNEL} -> FB Page {FB_PAGE_ID} enabled={is_fb_enabled()} (FB_ENABLED={FB_ENABLED} FB_PAGE_ENABLED={FB_PAGE_ENABLED}) | Threads {THREADS_USER_ID} enabled={THREADS_ENABLED} | Время {now_t} График 9-20: {is_working_hours()} | Видео: {'ВЫКЛ' if DISABLE_VIDEO else 'ВКЛ'} | Дедуп: {len(POSTED_IDS)}")
+    logger.info(f"Бот запущен {SOURCE_CHANNEL} -> FB Page {FB_PAGE_ID} enabled={is_fb_enabled()} FB_ENABLED={FB_ENABLED} FB_PAGE_ENABLED={FB_PAGE_ENABLED} | Threads {THREADS_USER_ID} enabled={THREADS_ENABLED} THREADS_DISABLE_VIDEO={THREADS_DISABLE_VIDEO} | Время {now_t} График 9-20: {is_working_hours()} | Дедуп: {len(POSTED_IDS)} | Видео FB: {"ВЫКЛ" if DISABLE_VIDEO else "ВКЛ"} Видео Threads: {"ВЫКЛ" if THREADS_DISABLE_VIDEO else "ВКЛ"}")
     app.run_polling(allowed_updates=["channel_post"], poll_interval=60.0, timeout=50, drop_pending_updates=False, close_loop=False)
 
 if __name__ == "__main__":
