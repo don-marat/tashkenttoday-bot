@@ -185,14 +185,74 @@ def format_text_facebook(text, mid, with_link=True):
         return text
 
 def format_text_threads(text, mid, with_link=True):
+    """Заголовок + 1 абзац + Подробнее: ссылка (для Threads)"""
     text = text.strip()
-    if len(text) > 480:
-        text = text[:480] + "..."
-    if with_link and len(text) < 380:
+    if not text:
         link = f"https://t.me/{SOURCE_CHANNEL.replace('@','')}/{mid}"
-        if len(text) + len(link) + 4 <= 500:
-            text = f"{text}\n\nПодробнее: {link}"
-    return text
+        return f"Подробнее: {link}" if with_link else ""
+
+    # Разбиваем на абзацы по двойному переносу
+    # Первый непустой абзац/строка = заголовок
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    paras = [p.strip() for p in text.split("\n\n") if p.strip()]
+
+    if not paras:
+        title = lines[0] if lines else text[:120]
+        first_para = ""
+    else:
+        title = paras[0].split("\n")[0].strip()  # заголовок - первая строка первого абзаца
+        # Если в тексте заголовок отдельно от абзацев (как в твоих постах)
+        # берем первый абзац как title, второй как first_para
+        if len(paras) >= 2:
+            # В твоих постах: 1-й параграф = заголовок, 2-й = первый абзац
+            # Но если 1-й параграф короткий (<120 символов), считаем его заголовком
+            if len(paras[0]) < 150:
+                title = paras[0]
+                first_para = paras[1]
+            else:
+                # Если первый абзац длинный - делим его
+                title = title
+                first_para = paras[0][len(title):].strip() or (paras[1] if len(paras) > 1 else "")
+                if not first_para and len(paras) > 1:
+                    first_para = paras[1]
+        else:
+            # Только один абзац - title = первая строка, first_para = остаток
+            rest = "\n".join(paras[0].split("\n")[1:]).strip()
+            first_para = rest
+
+    # Очищаем first_para от лишних переносов
+    first_para = first_para.replace("\n", " ").strip()
+    # Ограничиваем абзац чтобы влезть в 500 символов с заголовком и ссылкой
+    link = f"https://t.me/{SOURCE_CHANNEL.replace('@','')}/{mid}"
+    link_block = f"\n\nПодробнее: {link}" if with_link else ""
+
+    # Считаем лимит: Threads лимит 500, оставляем место под ссылку ~80 + заголовок
+    # Заголовок + абзац должны уложиться
+    available = 500 - len(link_block) - 2  # 2 для \n\n
+    # Заголовок оставляем как есть (до 150), остальное под абзац
+    if len(title) > 150:
+        title = title[:147] + "..."
+
+    remaining = available - len(title) - 2  # 2 для \n\n между заголовком и абзацем
+    if first_para:
+        if len(first_para) > remaining:
+            first_para = first_para[: max(0, remaining - 3)] + "..."
+        result = f"{title}\n\n{first_para}{link_block}"
+    else:
+        result = f"{title}{link_block}"
+
+    # Финальная проверка длины
+    if len(result) > 500:
+        # Режем абзац еще
+        overflow = len(result) - 500
+        if first_para:
+            first_para = first_para[: max(0, len(first_para) - overflow - 3)] + "..."
+            result = f"{title}\n\n{first_para}{link_block}"
+        else:
+            title = title[: max(0, len(title) - overflow - 3)] + "..."
+            result = f"{title}{link_block}"
+
+    return result
 
 def upload_to_public_host(tg_url, filename, mime):
     try:
@@ -513,8 +573,18 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         logger.info("Threads ВЫКЛЮЧЕН THREADS_ENABLED=false")
 
-    if fb_res or th_res or (not is_fb_enabled() and not THREADS_ENABLED) or (is_video and THREADS_DISABLE_VIDEO and not is_fb_enabled()):
+    # Сохраняем ID если хотя бы одна попытка была (или видео отключено специально)
+    # Если FB выключен и Threads выключен - тоже сохраняем чтобы не зациклиться
+    # Если Threads упал - сохраняем все равно после 1 попытки, чтобы не спамить
+    if fb_res or th_res or not is_fb_enabled() or not THREADS_ENABLED or (is_video and DISABLE_VIDEO) or (is_video and THREADS_DISABLE_VIDEO):
         save_posted_id(mid)
+    else:
+        # Обе платформы включены но обе упали - не сохраняем, чтобы ретрайнуть
+        # Но только для фото, для видео уже сохранено выше
+        if not is_video:
+            logger.warning(f"⚠️ Пост {mid}: FB и Threads оба failed, не сохраняем ID для ретрая")
+        else:
+            save_posted_id(mid)
 
 async def process_album_job(context: ContextTypes.DEFAULT_TYPE):
     mg_id = context.job.data
@@ -574,9 +644,11 @@ async def process_album_job(context: ContextTypes.DEFAULT_TYPE):
     if THREADS_ENABLED:
         th_res = post_to_threads(th_text, pub_imgs=pub_imgs)
 
-    if fb_res or th_res:
+    if fb_res or th_res or not is_fb_enabled() or not THREADS_ENABLED:
         save_posted_id(mid)
-        logger.info(f"Альбом {mg_id} УСПЕХ")
+        logger.info(f"Альбом {mg_id} УСПЕХ ID {mid} сохранен")
+    else:
+        logger.warning(f"Альбом {mg_id}: FB и Threads оба failed, не сохраняем для ретрая")
 
 async def auto_refresh_job(context: ContextTypes.DEFAULT_TYPE):
     logger.info("Авто-проверка токенов...")
