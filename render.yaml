@@ -39,6 +39,8 @@ services:
         value: "true"
       - key: WORK_START_HOUR
         value: "9"
+      - key: PYTHON_VERSION
+        value: 3.11.9
       - key: WORK_END_HOUR
         value: "20"
     disk:
