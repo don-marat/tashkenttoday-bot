@@ -47,6 +47,38 @@ def load_posted_ids():
         logger.error(f"load_posted_ids: {e}")
         POSTED_IDS = set()
 
+def push_to_github():
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        return False
+    try:
+        import base64
+        # get current file sha
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/posted_ids.json"
+        headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
+        r = requests.get(url, headers=headers, timeout=15)
+        sha = r.json().get("sha") if r.status_code == 200 else None
+        
+        with open(POSTED_FILE, "r") as f:
+            content = f.read()
+        b64 = base64.b64encode(content.encode()).decode()
+        
+        data = {"message": f"Update posted_ids {len(POSTED_IDS)} posts {datetime.now(TASHKENT_TZ).strftime('%Y-%m-%d %H:%M')}", "content": b64, "branch": "main"}
+        if sha:
+            data["sha"] = sha
+        
+        r2 = requests.put(url, headers=headers, json=data, timeout=20)
+        if r2.status_code in (200,201):
+            logger.info(f"GitHub push OK {len(POSTED_IDS)} IDs")
+            return True
+        else:
+            logger.warning(f"GitHub push fail {r2.status_code} {r2.text[:500]}")
+            return False
+    except Exception as e:
+        logger.error(f"GitHub push error: {e}")
+        return False
+
+POSTED_SAVE_COUNTER = 0
+
 def save_posted_id(mid):
     try:
         POSTED_IDS.add(mid)
@@ -77,6 +109,8 @@ THREADS_TOKEN_FILE = os.getenv("THREADS_TOKEN_FILE", "threads_token.txt")
 FB_PAGE_TOKEN_FILE = os.getenv("FB_TOKEN_FILE", "fb_page_token.txt")
 FB_USER_TOKEN_FILE = os.getenv("FB_USER_TOKEN_FILE", "fb_user_token.txt")
 
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_REPO = os.getenv("GITHUB_REPO", "don-marat/tashkenttoday-bot")
 RAILWAY_API_TOKEN = os.getenv("RAILWAY_API_TOKEN")
 RAILWAY_PROJECT_ID = os.getenv("RAILWAY_PROJECT_ID")
 RAILWAY_ENV_ID = os.getenv("RAILWAY_ENVIRONMENT_ID") or os.getenv("RAILWAY_ENV_ID")
