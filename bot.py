@@ -3,14 +3,42 @@ import logging
 import requests
 import time
 import asyncio
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from collections import defaultdict
 from telegram import Update
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 from datetime import datetime, timezone, timedelta
 import json
+import re
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
+
+# Simple HTTP server for Render health check (free plan needs to bind to PORT)
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain; charset=utf-8')
+        self.end_headers()
+        try:
+            from __main__ import SOURCE_CHANNEL as SC, POSTED_IDS as PIDS, TASHKENT_TZ as TZ
+            now = datetime.now(TZ).strftime('%Y-%m-%d %H:%M')
+            msg = f"Bot running {SC} | {len(PIDS)} posts | {now} | OK"
+        except:
+            msg = "OK"
+        self.wfile.write(msg.encode('utf-8'))
+    def log_message(self, format, *args):
+        return
+
+def start_keepalive():
+    port = int(os.getenv("PORT", "10000"))
+    try:
+        server = HTTPServer(("0.0.0.0", port), HealthHandler)
+        logger.info(f"Keepalive HTTP server started on 0.0.0.0:{port}")
+        server.serve_forever()
+    except Exception as e:
+        logger.error(f"Keepalive failed: {e}")
 
 MEDIA_GROUP_CACHE = defaultdict(list)
 MEDIA_GROUP_LAST_TEXT = {}
@@ -19,8 +47,8 @@ WORK_START_HOUR = int(os.getenv("WORK_START_HOUR", "9"))
 WORK_END_HOUR = int(os.getenv("WORK_END_HOUR", "20"))
 TASHKENT_TZ = timezone(timedelta(hours=5))
 DISABLE_VIDEO = os.getenv("DISABLE_VIDEO", "true").lower() in ("1", "true", "yes")
+THREADS_DISABLE_VIDEO = os.getenv("THREADS_DISABLE_VIDEO", "true").lower() in ("1", "true", "yes")
 
-# ВКЛ/ВЫКЛ платформ - можно отключать в Railway Variables
 FB_ENABLED = os.getenv("FB_ENABLED", "true").lower() in ("1", "true", "yes")
 FB_PAGE_ENABLED = os.getenv("FB_PAGE_ENABLED", "true").lower() in ("1", "true", "yes")
 THREADS_ENABLED = os.getenv("THREADS_ENABLED", "true").lower() in ("1", "true", "yes")
@@ -32,9 +60,6 @@ def is_working_hours(now=None):
     if now is None:
         now = datetime.now(TASHKENT_TZ)
     return WORK_START_HOUR <= now.hour < WORK_END_HOUR
-
-POSTED_FILE = os.getenv("POSTED_FILE", "posted_ids.json")
-POSTED_IDS = set()
 
 def load_posted_ids():
     global POSTED_IDS
@@ -557,37 +582,53 @@ async def error_handler(update, context):
     else:
         logger.error(f"Error: {context.error}")
 
+
+
 def main():
-    # Запускаем keepalive для Render
-    try:
-        start_keepalive()
-    except:
-        pass
+    # Start keepalive in daemon thread for Render
+    t = threading.Thread(target=start_keepalive, daemon=True)
+    t.start()
+    time.sleep(1)
+
     if not TELEGRAM_BOT_TOKEN:
         logger.error("Нет TELEGRAM_BOT_TOKEN!")
         return
+
     load_posted_ids()
+
+    # Clear webhook
     for attempt in range(2):
         try:
             requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=False", timeout=10)
-            time.sleep(5)
+            time.sleep(2)
             break
         except:
-            time.sleep(3)
+            time.sleep(2)
+
     global THREADS_TOKEN, FB_PAGE_TOKEN, FB_USER_TOKEN
     THREADS_TOKEN = load_token(THREADS_TOKEN_FILE, THREADS_TOKEN_ENV)
     FB_PAGE_TOKEN = load_token(FB_PAGE_TOKEN_FILE, FB_PAGE_TOKEN_ENV)
     FB_USER_TOKEN = load_token(FB_USER_TOKEN_FILE, FB_USER_TOKEN_ENV)
-    check_fb_expiry()
-    check_threads_expiry()
+
+    # For PTB 21+ on Python 3.14, ensure event loop exists in main thread
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, handle_channel_post))
     app.add_error_handler(error_handler)
     if app.job_queue:
         app.job_queue.run_repeating(auto_refresh_job, interval=24*60*60, first=60)
+
     now_t = datetime.now(TASHKENT_TZ).strftime("%H:%M")
-    logger.info(f"Бот запущен {SOURCE_CHANNEL} -> FB Page {FB_PAGE_ID} enabled={is_fb_enabled()} (FB_ENABLED={FB_ENABLED} FB_PAGE_ENABLED={FB_PAGE_ENABLED}) | Threads {THREADS_USER_ID} enabled={THREADS_ENABLED} | Время {now_t} График 9-20: {is_working_hours()} | Видео: {'ВЫКЛ' if DISABLE_VIDEO else 'ВКЛ'} | Дедуп: {len(POSTED_IDS)}")
-    app.run_polling(allowed_updates=["channel_post"], poll_interval=60.0, timeout=50, drop_pending_updates=False, close_loop=False)
+    vid_fb = "ВЫКЛ" if DISABLE_VIDEO else "ВКЛ"
+    vid_th = "ВЫКЛ" if THREADS_DISABLE_VIDEO else "ВКЛ"
+    logger.info(f"Бот запущен {SOURCE_CHANNEL} -> FB Page {FB_PAGE_ID} enabled={is_fb_enabled()} (FB_ENABLED={FB_ENABLED} FB_PAGE_ENABLED={FB_PAGE_ENABLED}) | Threads {THREADS_USER_ID} enabled={THREADS_ENABLED} | Время {now_t} График 9-20: {is_working_hours()} | Видео FB {vid_fb} Threads {vid_th} | Дедуп: {len(POSTED_IDS)}")
+
+    # PTB 21.11: run_polling without close_loop param
+    app.run_polling(allowed_updates=["channel_post"], poll_interval=20.0, timeout=30, drop_pending_updates=False)
 
 if __name__ == "__main__":
     main()
