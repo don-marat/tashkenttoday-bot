@@ -240,25 +240,89 @@ def refresh_threads_token():
 
 def format_text_facebook(text, mid, with_link=True):
     text = text.strip()
-    if with_link:
-        link = f"https://t.me/{SOURCE_CHANNEL.replace('@','')}/{mid}"
-        if len(text) > 900:
-            text = text[:900] + "..."
-        return f"{text}\n\n🔗 {link}"
+    # Разбиваем на абзацы по двойному переносу
+    paras = [p.strip() for p in re.split(r'\n\s*\n+', text) if p.strip()]
+    if not paras:
+        return ""
+
+    title = paras[0]
+    first_para = paras[1] if len(paras) > 1 else ""
+
+    # Логика: заголовок + первый абзац + ссылка
+    if first_para:
+        base = f"{title}\n\n{first_para}"
     else:
-        if len(text) > 1000:
-            text = text[:1000] + "..."
-        return text
+        base = title
+
+    if with_link:
+        clean_channel = SOURCE_CHANNEL.replace('@','').strip()
+        link = f"https://t.me/{clean_channel}/{mid}"
+        # Чистим хвосты
+        base = re.sub(rf'@?{re.escape(clean_channel)}\s*$', '', base, flags=re.IGNORECASE).strip()
+        base = re.sub(rf'https?://t\.me/{re.escape(clean_channel)}/\d+\s*$', '', base, flags=re.IGNORECASE).strip()
+        
+        # Финальный формат для FB: Заголовок + Первый абзац + Подробнее: ссылка
+        result = f"{base}\n\nПодробнее: {link}"
+        
+        # Если слишком длинно (>1000), режем первый абзац
+        if len(result) > 1000:
+            allowed_first = 1000 - len(title) - len(f"\n\n\n\nПодробнее: {link}") - 10
+            if allowed_first > 50 and first_para:
+                first_cut = first_para[:allowed_first].rsplit(' ', 1)[0] + "..."
+                result = f"{title}\n\n{first_cut}\n\nПодробнее: {link}"
+            else:
+                result = f"{title}\n\nПодробнее: {link}"
+        return result
+    else:
+        if len(base) > 1000:
+            base = base[:997] + "..."
+        return base
 
 def format_text_threads(text, mid, with_link=True):
     text = text.strip()
-    if len(text) > 480:
-        text = text[:480] + "..."
-    if with_link and len(text) < 400:
-        link = f" t.me/{SOURCE_CHANNEL.replace('@','')}/{mid}"
-        if len(text) + len(link) <= 500:
-            text = text + f"\n\n{link}"
-    return text
+    paras = [p.strip() for p in re.split(r'\n\s*\n+', text) if p.strip()]
+    if not paras:
+        return ""
+
+    title = paras[0].strip()
+    first_para = paras[1] if len(paras) > 1 else ""
+    first_para = first_para.strip()
+
+    clean_channel = SOURCE_CHANNEL.replace('@','').strip()
+    link = f"https://t.me/{clean_channel}/{mid}"
+    more = f"Подробнее: {link}"
+
+    # Лимит Threads 500
+    LIMIT = 500
+
+    # Сначала пробуем заголовок + первый абзац + Подробнее
+    if first_para:
+        candidate = f"{title}\n\n{first_para}\n\n{more}"
+        if len(candidate) <= LIMIT:
+            return candidate
+        # Если не влазит - пробуем урезать первый абзац
+        # Сколько места под первый абзац?
+        reserved = len(title) + len(f"\n\n\n\n{more}")
+        allowed = LIMIT - reserved
+        if allowed > 50:
+            cut = first_para[:allowed].rsplit(' ', 1)[0] + "..."
+            candidate2 = f"{title}\n\n{cut}\n\n{more}"
+            if len(candidate2) <= LIMIT:
+                return candidate2
+
+    # Если первый абзац не влазит вообще - только заголовок + Подробнее
+    candidate_title_only = f"{title}\n\n{more}"
+    if len(candidate_title_only) <= LIMIT:
+        return candidate_title_only
+
+    # Если даже заголовок+ссылка не влазит - режем заголовок
+    allowed_title = LIMIT - len(f"\n\n{more}") - 5
+    if allowed_title > 20:
+        title_cut = title[:allowed_title].rsplit(' ', 1)[0] + "..."
+        return f"{title_cut}\n\n{more}"
+
+    # Последний фолбек - только заголовок обрезанный до 500
+    return title[:497] + "..." if len(title) > LIMIT else title
 
 def upload_to_public_host(tg_url, filename, mime):
     try:
