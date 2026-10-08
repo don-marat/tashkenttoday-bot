@@ -61,6 +61,12 @@ def is_working_hours(now=None):
         now = datetime.now(TASHKENT_TZ)
     return WORK_START_HOUR <= now.hour < WORK_END_HOUR
 
+POSTED_FILE = os.getenv("POSTED_FILE", "posted_ids.json")
+POSTED_IDS = set()
+POSTED_SAVE_COUNTER = 0
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_REPO = os.getenv("GITHUB_REPO", "don-marat/tashkenttoday-bot")
+
 def load_posted_ids():
     global POSTED_IDS
     try:
@@ -102,8 +108,6 @@ def push_to_github():
         logger.error(f"GitHub push error: {e}")
         return False
 
-POSTED_SAVE_COUNTER = 0
-
 def save_posted_id(mid):
     try:
         POSTED_IDS.add(mid)
@@ -134,8 +138,6 @@ THREADS_TOKEN_FILE = os.getenv("THREADS_TOKEN_FILE", "threads_token.txt")
 FB_PAGE_TOKEN_FILE = os.getenv("FB_TOKEN_FILE", "fb_page_token.txt")
 FB_USER_TOKEN_FILE = os.getenv("FB_USER_TOKEN_FILE", "fb_user_token.txt")
 
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-GITHUB_REPO = os.getenv("GITHUB_REPO", "don-marat/tashkenttoday-bot")
 RAILWAY_API_TOKEN = os.getenv("RAILWAY_API_TOKEN")
 RAILWAY_PROJECT_ID = os.getenv("RAILWAY_PROJECT_ID")
 RAILWAY_ENV_ID = os.getenv("RAILWAY_ENVIRONMENT_ID") or os.getenv("RAILWAY_ENV_ID")
