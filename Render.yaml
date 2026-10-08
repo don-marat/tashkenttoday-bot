@@ -1,0 +1,47 @@
+
+services:
+  - type: web
+    name: tashkenttoday-bot
+    runtime: python
+    plan: free
+    region: frankfurt
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: FB_PAGE_ID
+        value: 568226286376483
+      - key: FB_PAGE_TOKEN
+        sync: false
+      - key: FB_USER_LONG_TOKEN
+        sync: false
+      - key: FB_APP_ID
+        value: 1301269625209688
+      - key: FB_APP_SECRET
+        sync: false
+      - key: THREADS_USER_ID
+        value: 27092394720363294
+      - key: THREADS_TOKEN
+        sync: false
+      - key: SOURCE_CHANNEL
+        value: "@tashkenttodayuz"
+      - key: POSTED_FILE
+        value: "/opt/render/project/src/data/posted_ids.json"
+      - key: DISABLE_VIDEO
+        value: "true"
+      - key: THREADS_DISABLE_VIDEO
+        value: "true"
+      - key: FB_ENABLED
+        value: "true"
+      - key: THREADS_ENABLED
+        value: "true"
+      - key: WORK_START_HOUR
+        value: "9"
+      - key: WORK_END_HOUR
+        value: "20"
+    disk:
+      name: bot-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1
