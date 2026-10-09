@@ -44,7 +44,7 @@ MEDIA_GROUP_CACHE = defaultdict(list)
 MEDIA_GROUP_LAST_TEXT = {}
 
 WORK_START_HOUR = int(os.getenv("WORK_START_HOUR", "9"))
-WORK_END_HOUR = int(os.getenv("WORK_END_HOUR", "20"))
+WORK_END_HOUR = int(os.getenv("WORK_END_HOUR", "21"))
 TASHKENT_TZ = timezone(timedelta(hours=5))
 DISABLE_VIDEO = os.getenv("DISABLE_VIDEO", "true").lower() in ("1", "true", "yes")
 THREADS_DISABLE_VIDEO = os.getenv("THREADS_DISABLE_VIDEO", "true").lower() in ("1", "true", "yes")
