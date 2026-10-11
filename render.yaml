@@ -42,7 +42,7 @@ services:
       - key: PYTHON_VERSION
         value: 3.11.9
       - key: WORK_END_HOUR
-        value: "20"
+        value: "21"
     disk:
       name: bot-data
       mountPath: /opt/render/project/src/data
