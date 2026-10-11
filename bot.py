@@ -426,7 +426,12 @@ async def process_album_job(context: ContextTypes.DEFAULT_TYPE):
     if fb_res or th_res: save_posted_id(mid)
 
 async def auto_refresh_job(context: ContextTypes.DEFAULT_TYPE):
-    check_fb_expiry(); check_threads_expiry(); refresh_fb_page_token(); refresh_threads_token()
+    logger.info("Авто-проверка токенов... FB отключен, пропуск")
+    try:
+        check_threads_expiry()
+        refresh_threads_token()
+    except:
+        pass
 
 async def error_handler(update, context):
     err=str(context.error)
