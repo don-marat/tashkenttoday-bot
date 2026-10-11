@@ -7,7 +7,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from collections import defaultdict
 from telegram import Update
-from telegram.ext import Application, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, ContextTypes, MessageHandler, filters, CommandHandler
 from datetime import datetime, timezone, timedelta
 import json
 import re
@@ -295,20 +295,16 @@ def upload_to_public_host(tg_url, filename, mime):
 
 def post_to_facebook(text, tg_img=None, pub_img=None, video_url=None, pub_imgs=None):
     if not is_fb_enabled():
-        logger.info(f"FB Page отключен FB_ENABLED={FB_ENABLED} FB_PAGE_ENABLED={FB_PAGE_ENABLED}")
         return None
     if not FB_PAGE_TOKEN or not FB_PAGE_ID:
-        logger.warning("FB token/ID не заданы")
         return None
     try:
         if video_url:
             url = f"https://graph.facebook.com/v20.0/{FB_PAGE_ID}/videos"
             data = {"description": text, "file_url": video_url, "access_token": FB_PAGE_TOKEN}
             r = requests.post(url, data=data, timeout=120)
-            logger.info(f"FB video: {r.status_code} {r.text[:500]}")
             return r.json() if r.status_code == 200 else None
         if pub_imgs:
-            # альбом
             ids = []
             for img in pub_imgs:
                 url = f"https://graph.facebook.com/v20.0/{FB_PAGE_ID}/photos"
@@ -348,20 +344,16 @@ def post_to_threads(text, tg_img=None, pub_img=None, video_url=None, pub_imgs=No
         create_url = f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads"
         short_text = text[:500]
         if video_url and not THREADS_DISABLE_VIDEO:
-            # video post
             payload = {"media_type": "VIDEO", "video_url": video_url, "text": short_text, "access_token": THREADS_TOKEN}
             r = requests.post(create_url, data=payload, timeout=90)
             cid = r.json().get("id")
             if not cid:
-                logger.warning(f"Threads video create fail {r.text[:500]}")
                 return None
             time.sleep(5)
             pub_url = f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads_publish"
             r2 = requests.post(pub_url, data={"creation_id": cid, "access_token": THREADS_TOKEN}, timeout=30)
-            logger.info(f"Threads video publish {r2.status_code} {r2.text[:500]}")
             return r2.json()
         if pub_imgs:
-            # Threads не поддерживает альбом, постим первое фото
             pub_img = pub_imgs[0]
         if pub_img:
             payload = {"media_type": "IMAGE", "image_url": pub_img, "text": short_text, "access_token": THREADS_TOKEN}
@@ -371,7 +363,6 @@ def post_to_threads(text, tg_img=None, pub_img=None, video_url=None, pub_imgs=No
                 time.sleep(5)
                 pub_url = f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads_publish"
                 r2 = requests.post(pub_url, data={"creation_id": cid, "access_token": THREADS_TOKEN}, timeout=30)
-                logger.info(f"Threads image publish {r2.status_code}")
                 return r2.json()
         payload = {"media_type": "TEXT", "text": short_text, "access_token": THREADS_TOKEN}
         r = requests.post(create_url, data=payload, timeout=30)
@@ -385,6 +376,113 @@ def post_to_threads(text, tg_img=None, pub_img=None, video_url=None, pub_imgs=No
     except Exception as e:
         logger.error(f"Threads error: {e}", exc_info=True)
         return None
+
+# === НОВАЯ ФУНКЦИЯ СВЕРКИ ===
+def fetch_last_channel_posts(n=10):
+    """Парсит t.me/s/ канал и возвращает последние n постов {id, text, photo}"""
+    try:
+        clean = SOURCE_CHANNEL.replace('@','').strip()
+        url = f"https://t.me/s/{clean}"
+        r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code!= 200:
+            logger.warning(f"fetch_last_channel_posts status {r.status_code}")
+            return []
+        html = r.text
+        # Находим все посты: data-post="channel/id"
+        posts = []
+        pattern = re.compile(r'data-post="'+re.escape(clean)+r'/(\d+)"')
+        ids = [int(m) for m in pattern.findall(html)]
+        # Берем последние n (они идут по возрастанию, последние в конце)
+        ids = sorted(set(ids))[-n:]
+        ids.reverse() # от новых к старым
+        for mid in ids:
+            # Вырезаем блок этого поста
+            # Текст
+            text_match = re.search(rf'{clean}/{mid}.*?<div class="tgme_widget_message_text[^"]*">(.*?)</div>', html, re.DOTALL)
+            text = ""
+            if text_match:
+                raw = text_match.group(1)
+                # чистим html теги
+                raw = re.sub(r'<br\s*/?>', '\n', raw)
+                raw = re.sub(r'<[^>]+>', '', raw)
+                raw = raw.strip()
+                text = raw
+            # Фото из style background-image
+            photo = None
+            photo_match = re.search(rf'{clean}/{mid}.*?background-image:url\(\'(.*?)\'\)', html, re.DOTALL)
+            if photo_match:
+                photo = photo_match.group(1)
+                # t.me дает превью, но для Threads сойдет, либо попробуем скачать
+                if photo.startswith("//"):
+                    photo = "https:" + photo
+            posts.append({"id": mid, "text": text, "photo": photo})
+        logger.info(f"fetch_last_channel_posts: нашлось {len(posts)} постов, IDs {ids}")
+        return posts
+    except Exception as e:
+        logger.error(f"fetch_last_channel_posts error: {e}", exc_info=True)
+        return []
+
+async def sync_missing_posts_job(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not is_working_hours():
+            logger.info("Синхронизация пропущена - вне графика 9-21")
+            return
+        logger.info("=== Старт сверки последних 10 постов ===")
+        posts = fetch_last_channel_posts(10)
+        added = 0
+        skipped = 0
+        for p in posts:
+            mid = p["id"]
+            if is_already_posted(mid):
+                logger.info(f"Пост {mid} уже есть - Пропуск")
+                skipped += 1
+                continue
+            raw_text = p["text"]
+            if not raw_text:
+                logger.info(f"Пост {mid} без текста - пропускаем")
+                save_posted_id(mid)
+                continue
+            # Проверка на видео - в превью t.me видео не отличить, но пропустим если есть слово video?
+            is_video = False
+            if not raw_text:
+                continue
+            logger.info(f"Пост {mid} отсутствует - добавляем в Threads")
+            fb_text = format_text_facebook(raw_text, mid, with_link=True)
+            th_text = format_text_threads(raw_text, mid, with_link=True)
+            pub_img = None
+            if p["photo"]:
+                # пробуем загрузить фото в публичный хост
+                try:
+                    pub_img = upload_to_public_host(p["photo"], "image.jpg", "image/jpeg")
+                except:
+                    pub_img = p["photo"]
+            th_res = None
+            if THREADS_ENABLED:
+                th_res = post_to_threads(th_text, pub_img=pub_img)
+            if th_res:
+                save_posted_id(mid)
+                added += 1
+                logger.info(f"Пост {mid} добавлен")
+                time.sleep(3) # пауза чтобы не спамить API
+            else:
+                logger.warning(f"Пост {mid} не удалось добавить")
+        logger.info(f"=== Сверка завершена: добавлено {added}, пропущено {skipped} ===")
+    except Exception as e:
+        logger.error(f"sync_missing_posts_job error: {e}", exc_info=True)
+
+async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🔄 Начинаю сверку последних 10 постов...")
+    await sync_missing_posts_job(context)
+    await update.message.reply_text("✅ Сверка завершена. Проверь логи.")
+
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    posts = fetch_last_channel_posts(10)
+    lines = [f"Всего в дедупе: {len(POSTED_IDS)}", f"График: {WORK_START_HOUR}-{WORK_END_HOUR} Ташкент", ""]
+    for p in posts:
+        status = "✅ есть" if is_already_posted(p["id"]) else "❌ нету"
+        preview = p["text"][:40].replace("\n"," ") + "..." if p["text"] else "(без текста)"
+        lines.append(f"{status} {p['id']} - {preview}")
+    await update.message.reply_text("\n".join(lines))
 
 async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     post = update.channel_post
@@ -462,4 +560,131 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.info(f"FB Page ВЫКЛЮЧЕН FB_ENABLED={FB_ENABLED} FB_PAGE_ENABLED={FB_PAGE_ENABLED}")
 
     if THREADS_ENABLED:
-        th_res = post_to_threads(th_text, tg_img, pub_img, video
+        th_res = post_to_threads(th_text, tg_img, pub_img, video_url=pub_video)
+    else:
+        logger.info("Threads ВЫКЛЮЧЕН")
+
+    if fb_res or th_res or (not is_fb_enabled() and not THREADS_ENABLED):
+        save_posted_id(mid)
+
+async def process_album_job(context: ContextTypes.DEFAULT_TYPE):
+    mg_id = context.job.data
+    posts = MEDIA_GROUP_CACHE.pop(mg_id, [])
+    text_info = MEDIA_GROUP_LAST_TEXT.pop(mg_id, None)
+    logger.info(f"Альбом JOB {mg_id}: {len(posts)} фото")
+    if not posts:
+        return
+    if not text_info:
+        for p in posts:
+            if p.caption:
+                text_info = (p.caption, p.message_id)
+                break
+    raw_text, mid = text_info if text_info else ("", posts[0].message_id)
+    if not raw_text:
+        return
+    if is_already_posted(mid):
+        return
+    if not is_working_hours():
+        save_posted_id(mid)
+        return
+
+    def get_full_tg_url(file_path):
+        if not file_path:
+            return None
+        if file_path.startswith("http"):
+            return file_path
+        return f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
+
+    pub_imgs = []
+    for idx, p in enumerate(posts):
+        if p.photo:
+            try:
+                file_id = p.photo[-1].file_id
+                file = await context.bot.get_file(file_id)
+                tg_url = get_full_tg_url(file.file_path)
+                if not tg_url:
+                    continue
+                pub = upload_to_public_host(tg_url, f"image_{idx}.jpg", "image/jpeg")
+                if pub:
+                    pub_imgs.append(pub)
+            except Exception as e:
+                logger.error(f"Album error: {e}", exc_info=True)
+
+    if not pub_imgs:
+        return
+
+    fb_text = format_text_facebook(raw_text, mid, with_link=True)
+    th_text = format_text_threads(raw_text, mid, with_link=True)
+
+    fb_res = None
+    th_res = None
+    if is_fb_enabled():
+        fb_res = post_to_facebook(fb_text, pub_imgs=pub_imgs)
+    if THREADS_ENABLED:
+        th_res = post_to_threads(th_text, pub_imgs=pub_imgs)
+
+    if fb_res or th_res:
+        save_posted_id(mid)
+
+async def auto_refresh_job(context: ContextTypes.DEFAULT_TYPE):
+    logger.info("Авто-проверка токенов...")
+    check_fb_expiry()
+    check_threads_expiry()
+    refresh_fb_page_token()
+    refresh_threads_token()
+
+async def error_handler(update, context):
+    err = str(context.error)
+    if "409" in err or "Conflict" in err or "TimedOut" in err or "Timed out" in err:
+        logger.warning(f"Telegram timeout/conflict, retry in 5s: {err[:200]}")
+        time.sleep(5)
+    else:
+        logger.error(f"Error: {context.error}")
+
+def main():
+    t = threading.Thread(target=start_keepalive, daemon=True)
+    t.start()
+    time.sleep(1)
+
+    if not TELEGRAM_BOT_TOKEN:
+        logger.error("Нет TELEGRAM_BOT_TOKEN!")
+        return
+
+    load_posted_ids()
+
+    for attempt in range(2):
+        try:
+            requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=False", timeout=10)
+            time.sleep(2)
+            break
+        except:
+            time.sleep(2)
+
+    global THREADS_TOKEN, FB_PAGE_TOKEN, FB_USER_TOKEN
+    THREADS_TOKEN = load_token(THREADS_TOKEN_FILE, THREADS_TOKEN_ENV)
+    FB_PAGE_TOKEN = load_token(FB_PAGE_TOKEN_FILE, FB_PAGE_TOKEN_ENV)
+    FB_USER_TOKEN = load_token(FB_USER_TOKEN_FILE, FB_USER_TOKEN_ENV)
+
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, handle_channel_post))
+    app.add_handler(CommandHandler("sync", cmd_sync))
+    app.add_handler(CommandHandler("status", cmd_status))
+    app.add_error_handler(error_handler)
+    if app.job_queue:
+        app.job_queue.run_repeating(auto_refresh_job, interval=24*60*60, first=60)
+        app.job_queue.run_once(sync_missing_posts_job, when=60, name="initial_sync")
+
+    now_t = datetime.now(TASHKENT_TZ).strftime("%H:%M")
+    vid_fb = "ВЫКЛ" if DISABLE_VIDEO else "ВКЛ"
+    vid_th = "ВЫКЛ" if THREADS_DISABLE_VIDEO else "ВКЛ"
+    logger.info(f"Бот запущен {SOURCE_CHANNEL} -> FB Page {FB_PAGE_ID} enabled={is_fb_enabled()} (FB_ENABLED={FB_ENABLED} FB_PAGE_ENABLED={FB_PAGE_ENABLED}) | Threads {THREADS_USER_ID} enabled={THREADS_ENABLED} | Время {now_t} График {WORK_START_HOUR}-{WORK_END_HOUR}: {is_working_hours()} | Видео FB {vid_fb} Threads {vid_th} | Дедуп: {len(POSTED_IDS)}")
+
+    app.run_polling(allowed_updates=["channel_post", "message"], poll_interval=15.0, timeout=60, drop_pending_updates=False)
+
+if __name__ == "__main__":
+    main()
