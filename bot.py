@@ -433,13 +433,13 @@ async def auto_refresh_job(context: ContextTypes.DEFAULT_TYPE):
     except:
         pass
 
-async def error_handler(update, context):
-    err=str(context.error)
-    if "409" in err or "Conflict" in err or "TimedOut" in err or "Timed out" in err:
-        logger.warning(f"Telegram timeout/conflict, retry: {err[:200]}")
-        time.sleep(5)
-    else:
-        logger.error(f"Error: {context.error}")
+   async def error_handler(update, context):
+       err = str(context.error)
+       if "409" in err or "Conflict" in err or "TimedOut" in err or "Timed out" in err:
+           logger.warning(f"Telegram timeout/conflict, retry: {err[:200]}")
+           time.sleep(5)
+       else:
+           logger.error(f"Error: {context.error}")
 
 def main():
     t=threading.Thread(target=start_keepalive, daemon=True); t.start(); time.sleep(1)
