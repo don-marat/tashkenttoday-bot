@@ -59,6 +59,7 @@ def load_posted_ids():
         if os.path.exists(POSTED_FILE):
             with open(POSTED_FILE, "r") as f:
                 POSTED_IDS = set(json.load(f))
+                logger.info(f"Загружено {len(POSTED_IDS)} ID из {POSTED_FILE}")
     except Exception as e:
         logger.error(f"load_posted_ids: {e}")
         POSTED_IDS = set()
@@ -107,6 +108,55 @@ THREADS_TOKEN = load_token(THREADS_TOKEN_FILE, THREADS_TOKEN_ENV)
 FB_PAGE_TOKEN = load_token(FB_PAGE_TOKEN_FILE, FB_PAGE_TOKEN_ENV)
 FB_USER_TOKEN = load_token(FB_USER_TOKEN_FILE, FB_USER_TOKEN_ENV)
 
+def check_fb_expiry():
+    if not FB_USER_TOKEN: return
+    try:
+        url = f"https://graph.facebook.com/v20.0/debug_token?input_token={FB_USER_TOKEN}&access_token={FB_APP_ID}|{FB_APP_SECRET}"
+        r = requests.get(url, timeout=15)
+        data = r.json().get("data", {})
+        exp = data.get("expires_at", 0)
+        if exp:
+            exp_dt = datetime.fromtimestamp(exp, tz=TASHKENT_TZ)
+            days = (exp_dt - datetime.now(TASHKENT_TZ)).days
+            logger.info(f"FB User token expires: {exp_dt} ({days} дней)")
+    except Exception as e:
+        logger.error(f"check_fb_expiry: {e}")
+
+def refresh_fb_page_token():
+    global FB_PAGE_TOKEN
+    if not FB_USER_TOKEN or not FB_PAGE_ID: return None
+    try:
+        url = f"https://graph.facebook.com/v20.0/{FB_PAGE_ID}?fields=access_token&access_token={FB_USER_TOKEN}"
+        r = requests.get(url, timeout=20)
+        new_t = r.json().get("access_token")
+        if new_t:
+            FB_PAGE_TOKEN = new_t
+            save_token(FB_PAGE_TOKEN_FILE, new_t)
+            return new_t
+    except Exception as e:
+        logger.error(f"refresh_fb_page error: {e}")
+    return None
+
+def check_threads_expiry():
+    if THREADS_TOKEN:
+        logger.info(f"Threads token present len={len(THREADS_TOKEN)}")
+
+def refresh_threads_token():
+    global THREADS_TOKEN
+    if not THREADS_TOKEN: return None
+    try:
+        url = f"https://graph.threads.net/refresh_access_token?grant_type=th_refresh_token&access_token={THREADS_TOKEN}"
+        r = requests.get(url, timeout=20)
+        new_t = r.json().get("access_token")
+        if new_t:
+            THREADS_TOKEN = new_t
+            save_token(THREADS_TOKEN_FILE, new_t)
+            logger.info(f"Threads refreshed")
+            return new_t
+    except Exception as e:
+        logger.error(f"refresh_threads error: {e}")
+    return None
+
 def format_text_facebook(text, mid, with_link=True):
     text=text.strip()
     paras=[p.strip() for p in re.split(r'\n\s*\n+', text) if p.strip()]
@@ -117,7 +167,6 @@ def format_text_facebook(text, mid, with_link=True):
         clean=SOURCE_CHANNEL.replace('@','').strip()
         link=f"https://t.me/{clean}/{mid}"
         base=re.sub(rf'@?{re.escape(clean)}\s*$','',base,flags=re.I).strip()
-        base=re.sub(rf'https?://t\.me/{re.escape(clean)}/\d+\s*$','',base,flags=re.I).strip()
         result=f"{base}\n\nПодробнее: {link}"
         if len(result)>1000 and first:
             allowed=1000-len(title)-len(f"\n\n\n\nПодробнее: {link}")-10
@@ -173,11 +222,6 @@ def post_to_facebook(text, tg_img=None, pub_img=None, video_url=None, pub_imgs=N
     if not is_fb_enabled(): return None
     if not FB_PAGE_TOKEN or not FB_PAGE_ID: return None
     try:
-        if video_url:
-            url=f"https://graph.facebook.com/v20.0/{FB_PAGE_ID}/videos"
-            data={"description":text,"file_url":video_url,"access_token":FB_PAGE_TOKEN}
-            r=requests.post(url,data=data,timeout=120)
-            return r.json() if r.status_code==200 else None
         img_list=pub_imgs or ([pub_img or tg_img] if (pub_img or tg_img) else [])
         if len(img_list)>1:
             media_ids=[]
@@ -237,24 +281,22 @@ def post_to_threads(text, tg_img=None, pub_img=None, video_url=None, pub_imgs=No
         logger.error(f"Threads error: {e}", exc_info=True)
         return None
 
-# === СВЕРКА ПОСЛЕДНИХ 10 - ФИКС ПАРСЕРА ===
+# === СВЕРКА ПОСЛЕДНИХ 10 ===
 def fetch_last_channel_posts(n=10):
     try:
         clean=SOURCE_CHANNEL.replace('@','').strip()
         url=f"https://t.me/s/{clean}"
-        r=requests.get(url,timeout=20,headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+        r=requests.get(url,timeout=20,headers={"User-Agent":"Mozilla/5.0"})
         if r.status_code!=200:
             logger.warning(f"t.me/s status {r.status_code}")
             return []
         html_text=r.text
-        # режем по врапперам
         wraps=re.split(r'<div class="tgme_widget_message_wrap[^"]*">', html_text)
         posts=[]
         for wrap in wraps:
             m=re.search(rf'data-post="{re.escape(clean)}/(\d+)"', wrap)
             if not m: continue
             mid=int(m.group(1))
-            # текст - может быть message_text или message_caption
             text=""
             tm=re.search(r'<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>', wrap, re.DOTALL)
             if tm:
@@ -264,7 +306,6 @@ def fetch_last_channel_posts(n=10):
                 raw=html.unescape(raw).strip()
                 text=raw
             if not text:
-                # попробуем caption (для фото)
                 cm=re.search(r'<div class="tgme_widget_message_caption[^"]*"[^>]*>(.*?)</div>', wrap, re.DOTALL)
                 if cm:
                     raw=cm.group(1)
@@ -272,18 +313,14 @@ def fetch_last_channel_posts(n=10):
                     raw=re.sub(r'<[^>]+>', '', raw)
                     raw=html.unescape(raw).strip()
                     text=raw
-            # фото
             photo=None
             pm=re.search(r"background-image:url\('(.*?)'\)", wrap)
             if pm:
                 photo=pm.group(1)
                 if photo.startswith("//"): photo="https:"+photo
-                # убираем превью параметры
                 photo=photo.replace("\\", "")
-            # только если есть хоть что-то
             if text or photo:
                 posts.append({"id":mid,"text":text,"photo":photo})
-        # сортируем по id desc и берем n
         posts=sorted(posts, key=lambda x: x["id"], reverse=True)[:n]
         logger.info(f"fetch_last_channel_posts: нашлось {len(posts)} постов IDs {[p['id'] for p in posts]}")
         return posts
@@ -311,7 +348,6 @@ async def sync_missing_posts_job(context: ContextTypes.DEFAULT_TYPE):
                 empty+=1
                 continue
             if len(raw_text)<5:
-                logger.info(f"Пост {mid} слишком короткий - пропускаем")
                 continue
             logger.info(f"Пост {mid} отсутствует - добавляем в Threads")
             th_text=format_text_threads(raw_text, mid, with_link=True)
@@ -328,8 +364,6 @@ async def sync_missing_posts_job(context: ContextTypes.DEFAULT_TYPE):
                 save_posted_id(mid)
                 added+=1
                 time.sleep(4)
-            else:
-                logger.warning(f"Пост {mid} не удалось добавить")
         logger.info(f"=== Сверка завершена: добавлено {added}, пропущено {skipped}, пустых {empty} ===")
     except Exception as e:
         logger.error(f"sync_missing_posts_job error: {e}", exc_info=True)
@@ -426,20 +460,20 @@ async def process_album_job(context: ContextTypes.DEFAULT_TYPE):
     if fb_res or th_res: save_posted_id(mid)
 
 async def auto_refresh_job(context: ContextTypes.DEFAULT_TYPE):
-    logger.info("Авто-проверка токенов... FB отключен, пропуск")
+    logger.info("Авто-проверка токенов... FB отключен")
     try:
         check_threads_expiry()
         refresh_threads_token()
-    except:
-        pass
+    except Exception as e:
+        logger.error(f"auto_refresh error: {e}")
 
-   async def error_handler(update, context):
-       err = str(context.error)
-       if "409" in err or "Conflict" in err or "TimedOut" in err or "Timed out" in err:
-           logger.warning(f"Telegram timeout/conflict, retry: {err[:200]}")
-           time.sleep(5)
-       else:
-           logger.error(f"Error: {context.error}")
+async def error_handler(update, context):
+    err=str(context.error)
+    if "409" in err or "Conflict" in err or "TimedOut" in err or "Timed out" in err:
+        logger.warning(f"Telegram timeout/conflict, retry: {err[:200]}")
+        time.sleep(5)
+    else:
+        logger.error(f"Error: {context.error}")
 
 def main():
     t=threading.Thread(target=start_keepalive, daemon=True); t.start(); time.sleep(1)
