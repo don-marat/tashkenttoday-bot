@@ -50,8 +50,6 @@ def is_working_hours(now=None):
 
 POSTED_FILE = os.getenv("POSTED_FILE", "posted_ids.json")
 POSTED_IDS = set()
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-GITHUB_REPO = os.getenv("GITHUB_REPO", "don-marat/tashkenttoday-bot")
 
 def load_posted_ids():
     global POSTED_IDS
@@ -133,8 +131,7 @@ def refresh_fb_page_token():
             FB_PAGE_TOKEN = new_t
             save_token(FB_PAGE_TOKEN_FILE, new_t)
             return new_t
-    except Exception as e:
-        logger.error(f"refresh_fb_page error: {e}")
+    except: pass
     return None
 
 def check_threads_expiry():
@@ -151,10 +148,8 @@ def refresh_threads_token():
         if new_t:
             THREADS_TOKEN = new_t
             save_token(THREADS_TOKEN_FILE, new_t)
-            logger.info(f"Threads refreshed")
             return new_t
-    except Exception as e:
-        logger.error(f"refresh_threads error: {e}")
+    except: pass
     return None
 
 def format_text_facebook(text, mid, with_link=True):
@@ -201,22 +196,46 @@ def format_text_threads(text, mid, with_link=True):
 
 def upload_to_public_host(tg_url, filename, mime):
     try:
-        r=requests.get(tg_url,timeout=60)
-        if r.status_code!=200 or len(r.content)<100: return None
-        data=r.content
+        r = requests.get(tg_url, timeout=60)
+        if r.status_code!= 200 or len(r.content) < 500:
+            logger.warning(f"upload: tg download fail {r.status_code} len={len(r.content) if r.content else 0}")
+            return None
+        data = r.content
+        logger.info(f"upload: downloaded {len(data)} bytes {mime}")
         try:
-            files={"fileToUpload":(filename,data,mime)}
-            cr=requests.post("https://catbox.moe/user/api.php",data={"reqtype":"fileupload"},files=files,timeout=30)
-            if cr.status_code==200 and cr.text.startswith("http"): return cr.text.strip()
-        except: pass
+            files = {"fileToUpload": (filename, data, mime)}
+            cr = requests.post("https://catbox.moe/user/api.php", data={"reqtype": "fileupload"}, files=files, timeout=30)
+            if cr.status_code == 200 and cr.text.startswith("http"):
+                logger.info(f"upload catbox OK {cr.text.strip()[:100]}")
+                return cr.text.strip()
+        except Exception as e:
+            logger.warning(f"upload catbox error {e}")
         try:
-            files={"file":(filename,data,mime)}
-            r2=requests.post("https://0x0.st",files=files,timeout=30)
-            if r2.status_code==200 and r2.text.startswith("http"): return r2.text.strip()
-        except: pass
+            files = {"file": (filename, data, mime)}
+            cr = requests.post("https://tmpfiles.org/api/v1/upload", files=files, timeout=30)
+            j = cr.json()
+            if cr.status_code == 200 and j.get("status") == "success":
+                url = j.get("data", {}).get("url", "")
+                if url:
+                    if "tmpfiles.org/" in url and "/dl/" not in url:
+                        url = url.replace("tmpfiles.org/", "tmpfiles.org/dl/")
+                    logger.info(f"upload tmpfiles OK {url}")
+                    return url
+        except Exception as e:
+            logger.warning(f"upload tmpfiles error {e}")
+        try:
+            files = {"file": (filename, data, mime)}
+            r2 = requests.post("https://0x0.st", files=files, timeout=30)
+            if r2.status_code == 200 and r2.text.startswith("http"):
+                logger.info(f"upload 0x0.st OK {r2.text.strip()[:100]}")
+                return r2.text.strip()
+        except Exception as e:
+            logger.warning(f"upload 0x0.st error {e}")
+        logger.warning(f"upload: все хосты упали, пробую прямую tg ссылку")
+        return tg_url
     except Exception as e:
-        logger.error(f"upload error: {e}")
-    return None
+        logger.error(f"upload error: {e}", exc_info=True)
+        return None
 
 def post_to_facebook(text, tg_img=None, pub_img=None, video_url=None, pub_imgs=None):
     if not is_fb_enabled(): return None
@@ -268,28 +287,29 @@ def post_to_threads(text, tg_img=None, pub_img=None, video_url=None, pub_imgs=No
                 cid=r.json().get("id"); time.sleep(5)
                 pub_url=f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads_publish"
                 r2=requests.post(pub_url,data={"creation_id":cid,"access_token":THREADS_TOKEN},timeout=30)
+                logger.info(f"Threads IMAGE publish {r2.status_code} {r2.text[:300]}")
                 return r2.json()
         payload={"media_type":"TEXT","text":short_text,"access_token":THREADS_TOKEN}
         r=requests.post(create_url,data=payload,timeout=30)
         cid=r.json().get("id")
-        if not cid: return None
+        if not cid:
+            logger.warning(f"Threads TEXT create fail {r.text[:500]}")
+            return None
         time.sleep(2)
         pub_url=f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads_publish"
         r2=requests.post(pub_url,data={"creation_id":cid,"access_token":THREADS_TOKEN},timeout=30)
+        logger.info(f"Threads TEXT publish {r2.status_code} {r2.text[:300]}")
         return r2.json()
     except Exception as e:
         logger.error(f"Threads error: {e}", exc_info=True)
         return None
 
-# === СВЕРКА ПОСЛЕДНИХ 10 ===
 def fetch_last_channel_posts(n=10):
     try:
         clean=SOURCE_CHANNEL.replace('@','').strip()
         url=f"https://t.me/s/{clean}"
         r=requests.get(url,timeout=20,headers={"User-Agent":"Mozilla/5.0"})
-        if r.status_code!=200:
-            logger.warning(f"t.me/s status {r.status_code}")
-            return []
+        if r.status_code!=200: return []
         html_text=r.text
         wraps=re.split(r'<div class="tgme_widget_message_wrap[^"]*">', html_text)
         posts=[]
@@ -343,11 +363,8 @@ async def sync_missing_posts_job(context: ContextTypes.DEFAULT_TYPE):
                 skipped+=1
                 continue
             raw_text=p["text"] or ""
-            if not raw_text:
-                logger.info(f"Пост {mid} без текста - пропускаем (не сохраняем)")
+            if not raw_text or len(raw_text)<5:
                 empty+=1
-                continue
-            if len(raw_text)<5:
                 continue
             logger.info(f"Пост {mid} отсутствует - добавляем в Threads")
             th_text=format_text_threads(raw_text, mid, with_link=True)
@@ -371,7 +388,7 @@ async def sync_missing_posts_job(context: ContextTypes.DEFAULT_TYPE):
 async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔄 Начинаю сверку последних 10 постов...")
     await sync_missing_posts_job(context)
-    await update.message.reply_text("✅ Сверка завершена. Проверь логи.")
+    await update.message.reply_text("✅ Сверка завершена.")
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     posts=fetch_last_channel_posts(10)
@@ -409,18 +426,19 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
         return f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
     th_text=format_text_threads(raw_text, mid, with_link=not is_video)
     fb_text=format_text_facebook(raw_text, mid, with_link=not is_video)
-    tg_img=None; pub_img=None; pub_video=None
+    tg_img=None; pub_img=None
     if post.photo:
         try:
             file_id=post.photo[-1].file_id
             file=await context.bot.get_file(file_id)
             tg_img=get_full_tg_url(file.file_path)
             if tg_img: pub_img=upload_to_public_host(tg_img, "image.jpg", "image/jpeg")
+            logger.info(f"Фото -> public: {bool(pub_img)}")
         except Exception as e:
             logger.error(f"Photo error: {e}", exc_info=True)
     fb_res=None; th_res=None
-    if is_fb_enabled(): fb_res=post_to_facebook(fb_text, tg_img, pub_img, video_url=pub_video)
-    if THREADS_ENABLED: th_res=post_to_threads(th_text, tg_img, pub_img, video_url=pub_video)
+    if is_fb_enabled(): fb_res=post_to_facebook(fb_text, tg_img, pub_img)
+    if THREADS_ENABLED: th_res=post_to_threads(th_text, tg_img, pub_img)
     if fb_res or th_res or (not is_fb_enabled() and not THREADS_ENABLED): save_posted_id(mid)
 
 async def process_album_job(context: ContextTypes.DEFAULT_TYPE):
