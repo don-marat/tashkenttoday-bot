@@ -8,6 +8,7 @@ from datetime import datetime, timezone, timedelta
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
 
+# Health check для Render + UptimeRobot Free (HEAD)
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -20,6 +21,10 @@ class HealthHandler(BaseHTTPRequestHandler):
         except:
             msg = "OK"
         self.wfile.write(msg.encode('utf-8'))
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain; charset=utf-8')
+        self.end_headers()
     def log_message(self, format, *args):
         return
 
@@ -50,6 +55,8 @@ def is_working_hours(now=None):
 
 POSTED_FILE = os.getenv("POSTED_FILE", "posted_ids.json")
 POSTED_IDS = set()
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_REPO = os.getenv("GITHUB_REPO", "don-marat/tashkenttoday-bot")
 
 def load_posted_ids():
     global POSTED_IDS
@@ -148,6 +155,7 @@ def refresh_threads_token():
         if new_t:
             THREADS_TOKEN = new_t
             save_token(THREADS_TOKEN_FILE, new_t)
+            logger.info(f"Threads refreshed")
             return new_t
     except: pass
     return None
@@ -202,6 +210,7 @@ def upload_to_public_host(tg_url, filename, mime):
             return None
         data = r.content
         logger.info(f"upload: downloaded {len(data)} bytes {mime}")
+        # 1 catbox
         try:
             files = {"fileToUpload": (filename, data, mime)}
             cr = requests.post("https://catbox.moe/user/api.php", data={"reqtype": "fileupload"}, files=files, timeout=30)
@@ -210,6 +219,7 @@ def upload_to_public_host(tg_url, filename, mime):
                 return cr.text.strip()
         except Exception as e:
             logger.warning(f"upload catbox error {e}")
+        # 2 tmpfiles.org - лучший для Threads
         try:
             files = {"file": (filename, data, mime)}
             cr = requests.post("https://tmpfiles.org/api/v1/upload", files=files, timeout=30)
@@ -223,6 +233,7 @@ def upload_to_public_host(tg_url, filename, mime):
                     return url
         except Exception as e:
             logger.warning(f"upload tmpfiles error {e}")
+        # 3 0x0.st
         try:
             files = {"file": (filename, data, mime)}
             r2 = requests.post("https://0x0.st", files=files, timeout=30)
