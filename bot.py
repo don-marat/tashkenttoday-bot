@@ -8,7 +8,6 @@ from datetime import datetime, timezone, timedelta
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
 
-# Health check для Render + UptimeRobot Free (HEAD)
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -21,7 +20,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         except:
             msg = "OK"
         self.wfile.write(msg.encode('utf-8'))
-    def do_HEAD(self):
+    def do_HEAD(self): # FIX для UptimeRobot Free (GET платный)
         self.send_response(200)
         self.send_header('Content-type', 'text/plain; charset=utf-8')
         self.end_headers()
@@ -55,8 +54,6 @@ def is_working_hours(now=None):
 
 POSTED_FILE = os.getenv("POSTED_FILE", "posted_ids.json")
 POSTED_IDS = set()
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-GITHUB_REPO = os.getenv("GITHUB_REPO", "don-marat/tashkenttoday-bot")
 
 def load_posted_ids():
     global POSTED_IDS
@@ -206,20 +203,12 @@ def upload_to_public_host(tg_url, filename, mime):
     try:
         r = requests.get(tg_url, timeout=60)
         if r.status_code!= 200 or len(r.content) < 500:
-            logger.warning(f"upload: tg download fail {r.status_code} len={len(r.content) if r.content else 0}")
+            logger.warning(f"upload: tg download fail {r.status_code}")
             return None
         data = r.content
         logger.info(f"upload: downloaded {len(data)} bytes {mime}")
-        # 1 catbox
-        try:
-            files = {"fileToUpload": (filename, data, mime)}
-            cr = requests.post("https://catbox.moe/user/api.php", data={"reqtype": "fileupload"}, files=files, timeout=30)
-            if cr.status_code == 200 and cr.text.startswith("http"):
-                logger.info(f"upload catbox OK {cr.text.strip()[:100]}")
-                return cr.text.strip()
-        except Exception as e:
-            logger.warning(f"upload catbox error {e}")
-        # 2 tmpfiles.org - лучший для Threads
+
+        # 1) tmpfiles.org - самый стабильный для Threads
         try:
             files = {"file": (filename, data, mime)}
             cr = requests.post("https://tmpfiles.org/api/v1/upload", files=files, timeout=30)
@@ -233,7 +222,18 @@ def upload_to_public_host(tg_url, filename, mime):
                     return url
         except Exception as e:
             logger.warning(f"upload tmpfiles error {e}")
-        # 3 0x0.st
+
+        # 2) catbox
+        try:
+            files = {"fileToUpload": (filename, data, mime)}
+            cr = requests.post("https://catbox.moe/user/api.php", data={"reqtype": "fileupload"}, files=files, timeout=30)
+            if cr.status_code == 200 and cr.text.startswith("http"):
+                logger.info(f"upload catbox OK {cr.text.strip()[:100]}")
+                return cr.text.strip()
+        except Exception as e:
+            logger.warning(f"upload catbox error {e}")
+
+        # 3) 0x0.st
         try:
             files = {"file": (filename, data, mime)}
             r2 = requests.post("https://0x0.st", files=files, timeout=30)
@@ -242,7 +242,8 @@ def upload_to_public_host(tg_url, filename, mime):
                 return r2.text.strip()
         except Exception as e:
             logger.warning(f"upload 0x0.st error {e}")
-        logger.warning(f"upload: все хосты упали, пробую прямую tg ссылку")
+
+        logger.warning("upload: все хосты упали, отдаю прямую tg ссылку")
         return tg_url
     except Exception as e:
         logger.error(f"upload error: {e}", exc_info=True)
