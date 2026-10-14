@@ -8,7 +8,6 @@ from datetime import datetime, timezone, timedelta
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
 
-# Health check для Render + UptimeRobot Free (Free теперь только HEAD)
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -20,7 +19,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             msg = f"Bot running {SC} | {len(PIDS)} posts | {now} | OK"
         except: msg = "OK"
         self.wfile.write(msg.encode('utf-8'))
-    def do_HEAD(self):
+    def do_HEAD(self): # FIX для UptimeRobot Free
         self.send_response(200)
         self.send_header('Content-type', 'text/plain; charset=utf-8')
         self.end_headers()
@@ -60,7 +59,6 @@ def load_posted_ids():
         if os.path.exists(POSTED_FILE):
             with open(POSTED_FILE, "r") as f:
                 POSTED_IDS = set(json.load(f))
-                logger.info(f"Загружено {len(POSTED_IDS)} ID из {POSTED_FILE}")
     except: POSTED_IDS = set()
 
 def save_posted_id(mid):
