@@ -236,7 +236,7 @@ def post_to_facebook(text, tg_img=None, pub_img=None, video_url=None, pub_imgs=N
         logger.error(f"FB error: {e}", exc_info=True)
         return None
 
-def fetch_last_channel_posts(n=10):
+def fetch_last_channel_posts(n=20):
     try:
         clean=SOURCE_CHANNEL.replace('@','').strip()
         url=f"https://t.me/s/{clean}"
@@ -281,12 +281,14 @@ def fetch_last_channel_posts(n=10):
 
 async def sync_missing_posts_job(context: ContextTypes.DEFAULT_TYPE):
     try:
-        if not is_working_hours(): return
-        if len(POSTED_IDS) == 0:
-            logger.info("sync skipped: Дедуп 0 - первый запуск, чтобы не грузить дубли")
+        if not is_working_hours():
+            logger.info("Синхронизация пропущена - вне графика 9-21")
             return
-        logger.info("=== Старт сверки последних 10 постов ===")
-        posts=fetch_last_channel_posts(10)
+        if len(POSTED_IDS) == 0:
+            logger.info("sync skipped: Дедуп 0 - первый запуск, не постим 20 старых")
+            return
+        logger.info("=== Старт сверки последних 20 постов ===")
+        posts=fetch_last_channel_posts(20)
         added=0; skipped=0
         for p in posts:
             mid=p["id"]
@@ -307,17 +309,17 @@ async def sync_missing_posts_job(context: ContextTypes.DEFAULT_TYPE):
             th_res=post_to_threads(th_text, pub_img=pub_img) if THREADS_ENABLED else None
             if th_res:
                 save_posted_id(mid); added+=1; time.sleep(4)
-        logger.info(f"=== Сверка: добавлено {added}, пропущено {skipped} ===")
+        logger.info(f"=== Сверка 20: добавлено {added}, пропущено {skipped} ===")
     except Exception as e:
         logger.error(f"sync error: {e}", exc_info=True)
 
 async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔄 Сверка 10 постов...")
+    await update.message.reply_text("🔄 Сверка 20 постов...")
     await sync_missing_posts_job(context)
-    await update.message.reply_text("✅ Готово")
+    await update.message.reply_text("✅ Готово 20")
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    posts=fetch_last_channel_posts(10)
+    posts=fetch_last_channel_posts(20)
     lines=[f"Всего: {len(POSTED_IDS)}", f"График {WORK_START_HOUR}-{WORK_END_HOUR}",""]
     for p in posts:
         status="✅ есть" if is_already_posted(p["id"]) else "❌ нету"
@@ -448,7 +450,6 @@ def main():
     app.add_error_handler(error_handler)
     if app.job_queue:
         app.job_queue.run_repeating(auto_refresh_job, interval=24*60*60, first=60)
-        # initial_sync убран чтобы не грузить дубли при Дедуп 0 - только по команде /sync
     now_t=datetime.now(TASHKENT_TZ).strftime("%H:%M")
     logger.info(f"Бот {SOURCE_CHANNEL} -> Threads {THREADS_USER_ID} | График {WORK_START_HOUR}-{WORK_END_HOUR} | Дедуп {len(POSTED_IDS)}")
     app.run_polling(allowed_updates=["channel_post","message"], poll_interval=15.0, timeout=60, drop_pending_updates=False)
