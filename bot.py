@@ -8,6 +8,7 @@ from datetime import datetime, timezone, timedelta
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
 
+# Health check для Render + UptimeRobot Free (Free теперь только HEAD)
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -17,15 +18,13 @@ class HealthHandler(BaseHTTPRequestHandler):
             from __main__ import SOURCE_CHANNEL as SC, POSTED_IDS as PIDS, TASHKENT_TZ as TZ
             now = datetime.now(TZ).strftime('%Y-%m-%d %H:%M')
             msg = f"Bot running {SC} | {len(PIDS)} posts | {now} | OK"
-        except:
-            msg = "OK"
+        except: msg = "OK"
         self.wfile.write(msg.encode('utf-8'))
     def do_HEAD(self):
         self.send_response(200)
         self.send_header('Content-type', 'text/plain; charset=utf-8')
         self.end_headers()
-    def log_message(self, format, *args):
-        return
+    def log_message(self, format, *args): return
 
 def start_keepalive():
     port = int(os.getenv("PORT", "10000"))
@@ -156,13 +155,8 @@ def format_text_facebook(text, mid, with_link=True):
         clean=SOURCE_CHANNEL.replace('@','').strip()
         link=f"https://t.me/{clean}/{mid}"
         result=f"{base}\n\nПодробнее: {link}"
-        if len(result)>1000 and first:
-            allowed=1000-len(title)-len(f"\n\n\n\nПодробнее: {link}")-10
-            if allowed>50:
-                cut=first[:allowed].rsplit(' ',1)[0]+"..."
-                result=f"{title}\n\n{cut}\n\nПодробнее: {link}"
-        return result
-    return base[:997]+"..." if len(base)>1000 else base
+        return result[:1000]
+    return base[:997]+"..."
 
 def upload_to_public_host(tg_url, filename, mime):
     try:
@@ -228,13 +222,10 @@ def post_to_threads(text, tg_img=None, pub_img=None, video_url=None, pub_imgs=No
         payload={"media_type":"TEXT","text":short_text,"access_token":THREADS_TOKEN}
         r=requests.post(create_url,data=payload,timeout=30)
         cid=r.json().get("id")
-        if not cid:
-            logger.warning(f"Threads TEXT create fail {r.text[:500]}")
-            return None
+        if not cid: return None
         time.sleep(2)
         pub_url=f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads_publish"
         r2=requests.post(pub_url,data={"creation_id":cid,"access_token":THREADS_TOKEN},timeout=30)
-        logger.info(f"Threads TEXT publish {r2.status_code} {r2.text[:300]}")
         return r2.json()
     except Exception as e:
         logger.error(f"Threads error: {e}", exc_info=True)
@@ -296,7 +287,6 @@ def fetch_last_channel_posts(n=10):
             if text or photo:
                 posts.append({"id":mid,"text":text,"photo":photo})
         posts=sorted(posts, key=lambda x: x["id"], reverse=True)[:n]
-        logger.info(f"fetch_last_channel_posts: {len(posts)} IDs {[p['id'] for p in posts]}")
         return posts
     except Exception as e:
         logger.error(f"fetch error: {e}", exc_info=True)
@@ -367,7 +357,7 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not fp: return None
         if fp.startswith("http"): return fp
         return f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{fp}"
-    th_text=format_text_threads(raw_text, mid, not is_video)
+    th_text=format_text_threads(raw_text, mid, True)
     tg_img=None; pub_img=None
     if post.photo:
         try:
@@ -375,7 +365,7 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
             file=await context.bot.get_file(file_id)
             tg_img=get_full_tg_url(file.file_path)
             if tg_img: pub_img=upload_to_public_host(tg_img, "image.jpg", "image/jpeg")
-            logger.info(f"Фото -> public: {bool(pub_img)} {pub_img[:80] if pub_img else ''}")
+            logger.info(f"Фото -> public: {bool(pub_img)}")
         except Exception as e:
             logger.error(f"Photo error: {e}", exc_info=True)
     th_res=post_to_threads(th_text, tg_img, pub_img) if THREADS_ENABLED else None
@@ -387,8 +377,7 @@ async def process_album_job(context: ContextTypes.DEFAULT_TYPE):
     if not posts: return
     if not text_info:
         for p in posts:
-            if p.caption:
-                text_info=(p.caption, p.message_id); break
+            if p.caption: text_info=(p.caption, p.message_id); break
     raw_text, mid=text_info if text_info else ("", posts[0].message_id)
     if not raw_text or is_already_posted(mid): return
     if not is_working_hours(): save_posted_id(mid); return
@@ -413,11 +402,9 @@ async def process_album_job(context: ContextTypes.DEFAULT_TYPE):
     if th_res: save_posted_id(mid)
 
 async def auto_refresh_job(context: ContextTypes.DEFAULT_TYPE):
-    logger.info("Авто-проверка токенов... FB отключен")
-    try:
-        refresh_threads_token()
-    except Exception as e:
-        logger.error(f"auto_refresh error: {e}")
+    logger.info("Авто-проверка токенов...")
+    try: refresh_threads_token()
+    except: pass
 
 async def error_handler(update, context):
     err=str(context.error)
@@ -452,7 +439,7 @@ def main():
         app.job_queue.run_repeating(auto_refresh_job, interval=24*60*60, first=60)
         app.job_queue.run_once(sync_missing_posts_job, when=60, name="initial_sync")
     now_t=datetime.now(TASHKENT_TZ).strftime("%H:%M")
-    logger.info(f"Бот {SOURCE_CHANNEL} -> Threads {THREADS_USER_ID} | Время {now_t} График {WORK_START_HOUR}-{WORK_END_HOUR} | Дедуп {len(POSTED_IDS)}")
+    logger.info(f"Бот {SOURCE_CHANNEL} -> Threads {THREADS_USER_ID} | График {WORK_START_HOUR}-{WORK_END_HOUR} | Дедуп {len(POSTED_IDS)}")
     app.run_polling(allowed_updates=["channel_post","message"], poll_interval=15.0, timeout=60, drop_pending_updates=False)
 
 if __name__=="__main__": main()
