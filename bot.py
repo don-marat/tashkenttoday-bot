@@ -19,7 +19,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             msg = f"Bot running {SC} | {len(PIDS)} posts | {now} | OK"
         except: msg = "OK"
         self.wfile.write(msg.encode('utf-8'))
-    def do_HEAD(self): # FIX для UptimeRobot Free
+    def do_HEAD(self): # для UptimeRobot Free
         self.send_response(200)
         self.send_header('Content-type', 'text/plain; charset=utf-8')
         self.end_headers()
@@ -29,7 +29,6 @@ def start_keepalive():
     port = int(os.getenv("PORT", "10000"))
     try:
         server = HTTPServer(("0.0.0.0", port), HealthHandler)
-        logger.info(f"Keepalive HTTP server started on 0.0.0.0:{port}")
         server.serve_forever()
     except Exception as e:
         logger.error(f"Keepalive failed: {e}")
@@ -156,6 +155,7 @@ def format_text_facebook(text, mid, with_link=True):
         return result[:1000]
     return base[:997]+"..."
 
+# === ФИКС КАРТИНОК: tmpfiles.org/dl дает HTML, а не JPEG ===
 def upload_to_public_host(tg_url, filename, mime):
     try:
         r = requests.get(tg_url, timeout=60)
@@ -164,36 +164,28 @@ def upload_to_public_host(tg_url, filename, mime):
             return None
         data = r.content
         logger.info(f"upload: downloaded {len(data)} bytes {mime}")
+        # 1) catbox - прямой https://files.catbox.moe/xxx.jpg
         try:
-            files = {"file": (filename, data, mime)}
-            cr = requests.post("https://tmpfiles.org/api/v1/upload", files=files, timeout=30)
-            j = cr.json()
-            if cr.status_code==200 and j.get("status")=="success":
-                url=j.get("data",{}).get("url","")
-                if url:
-                    if "tmpfiles.org/" in url and "/dl/" not in url:
-                        url=url.replace("tmpfiles.org/", "tmpfiles.org/dl/")
-                    logger.info(f"upload tmpfiles OK {url}")
-                    return url
-        except Exception as e:
-            logger.warning(f"upload tmpfiles error {e}")
-        try:
-            files={"fileToUpload":(filename,data,mime)}
-            cr=requests.post("https://catbox.moe/user/api.php", data={"reqtype":"fileupload"}, files=files, timeout=30)
-            if cr.status_code==200 and cr.text.startswith("http"):
-                logger.info(f"upload catbox OK {cr.text.strip()[:100]}")
-                return cr.text.strip()
+            files = {"fileToUpload": (filename, data, mime)}
+            cr = requests.post("https://catbox.moe/user/api.php", data={"reqtype": "fileupload"}, files=files, timeout=30)
+            if cr.status_code == 200 and cr.text.startswith("http"):
+                url = cr.text.strip()
+                logger.info(f"upload catbox OK {url}")
+                return url
         except Exception as e:
             logger.warning(f"upload catbox error {e}")
+        # 2) 0x0.st - прямой https://0x0.st/xxx.jpg
         try:
-            files={"file":(filename,data,mime)}
-            r2=requests.post("https://0x0.st", files=files, timeout=30)
-            if r2.status_code==200 and r2.text.startswith("http"):
-                logger.info(f"upload 0x0.st OK {r2.text.strip()[:100]}")
-                return r2.text.strip()
+            files = {"file": (filename, data, mime)}
+            r2 = requests.post("https://0x0.st", files=files, timeout=30)
+            if r2.status_code == 200 and r2.text.startswith("http"):
+                url = r2.text.strip()
+                logger.info(f"upload 0x0.st OK {url}")
+                return url
         except Exception as e:
             logger.warning(f"upload 0x0.st error {e}")
-        logger.warning("upload: все хосты упали, отдаю прямую tg ссылку")
+        # 3) fallback - прямая ссылка Telegram (работает для Threads)
+        logger.warning("upload: catbox/0x0 failed, using direct tg url")
         return tg_url
     except Exception as e:
         logger.error(f"upload error: {e}", exc_info=True)
@@ -305,6 +297,11 @@ async def sync_missing_posts_job(context: ContextTypes.DEFAULT_TYPE):
                 continue
             raw_text=p["text"] or ""
             if not raw_text or len(raw_text)<5: continue
+            # фильтр pinned
+            low=raw_text.lower()
+            if "pinned a photo" in low or "pinned a video" in low or "pinned" in low and "tashkent today" in low:
+                logger.info(f"Skip pinned service post {mid}")
+                save_posted_id(mid); continue
             th_text=format_text_threads(raw_text, mid, True)
             pub_img=None
             if p["photo"]:
@@ -331,9 +328,37 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"{status} {p['id']} {preview}")
     await update.message.reply_text("\n".join(lines))
 
+# === ФИЛЬТР PINNED ===
+def is_service_pinned_post(post, raw_text):
+    # 1) Telegram service: есть поле pinned_message
+    if getattr(post, 'pinned_message', None) is not None:
+        return True
+    if not raw_text:
+        return False
+    low = raw_text.lower()
+    # 2) Текст как на скрине
+    if "pinned a photo" in low or "pinned a video" in low or "pinned a message" in low:
+        return True
+    if "tashkent today - новости ташкента pinned" in low:
+        return True
+    # 3) Очень короткий текст только со ссылкой Подробнее: t.me/tashk...
+    if len(raw_text.strip()) < 80 and "подробнее:" in low and "t.me/tashk" in low:
+        # если нет заголовка новости
+        if "pinned" in low:
+            return True
+    return False
+
 async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     post=update.channel_post
     if not post: return
+
+    raw_text=post.text or post.caption or ""
+    # ФИЛЬТР PINNED - пропускаем
+    if is_service_pinned_post(post, raw_text):
+        logger.info(f"Skip service pinned post {post.message_id}: {raw_text[:80]}")
+        save_posted_id(post.message_id)
+        return
+
     if post.media_group_id:
         mg_id=post.media_group_id
         MEDIA_GROUP_CACHE[mg_id].append(post)
@@ -342,7 +367,7 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not context.job_queue.get_jobs_by_name(f"album_{mg_id}"):
             context.job_queue.run_once(process_album_job, when=7, name=f"album_{mg_id}", data=mg_id)
         return
-    raw_text=post.text or post.caption or ""
+
     if not raw_text: return
     mid=post.message_id
     if is_already_posted(mid): return
@@ -378,6 +403,9 @@ async def process_album_job(context: ContextTypes.DEFAULT_TYPE):
             if p.caption: text_info=(p.caption, p.message_id); break
     raw_text, mid=text_info if text_info else ("", posts[0].message_id)
     if not raw_text or is_already_posted(mid): return
+    if is_service_pinned_post(posts[0], raw_text):
+        logger.info(f"Skip service pinned album {mid}")
+        save_posted_id(mid); return
     if not is_working_hours(): save_posted_id(mid); return
     def get_full_tg_url(fp):
         if not fp: return None
