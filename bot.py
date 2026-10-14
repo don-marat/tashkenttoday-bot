@@ -281,8 +281,9 @@ def fetch_last_channel_posts(n=10):
 
 async def sync_missing_posts_job(context: ContextTypes.DEFAULT_TYPE):
     try:
-        if not is_working_hours():
-            logger.info("Синхронизация пропущена - вне графика 9-21")
+        if not is_working_hours(): return
+        if len(POSTED_IDS) == 0:
+            logger.info("sync skipped: Дедуп 0 - первый запуск, чтобы не грузить дубли")
             return
         logger.info("=== Старт сверки последних 10 постов ===")
         posts=fetch_last_channel_posts(10)
@@ -327,14 +328,11 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def is_service_pinned_post(post, raw_text):
     if getattr(post, 'pinned_message', None) is not None:
         return True
-    if not raw_text:
-        return False
+    if not raw_text: return False
     low = raw_text.lower()
     if "pinned a photo" in low or "pinned a video" in low or "pinned a message" in low:
         return True
     if "tashkent today - новости ташкента pinned" in low:
-        return True
-    if len(raw_text.strip()) < 80 and "подробнее:" in low and "t.me/tashk" in low and "pinned" in low:
         return True
     return False
 
@@ -343,9 +341,14 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not post: return
     raw_text=post.text or post.caption or ""
     if is_service_pinned_post(post, raw_text):
-        logger.info(f"Skip service pinned post {post.message_id}: {raw_text[:80]}")
+        logger.info(f"Skip service pinned post {post.message_id}")
         save_posted_id(post.message_id)
         return
+    mid=post.message_id
+    if is_already_posted(mid):
+        logger.info(f"Skip duplicate {mid} already posted")
+        return
+    save_posted_id(mid)
     if post.media_group_id:
         mg_id=post.media_group_id
         MEDIA_GROUP_CACHE[mg_id].append(post)
@@ -355,13 +358,10 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
             context.job_queue.run_once(process_album_job, when=7, name=f"album_{mg_id}", data=mg_id)
         return
     if not raw_text: return
-    mid=post.message_id
-    if is_already_posted(mid): return
-    if not is_working_hours():
-        save_posted_id(mid); return
+    if not is_working_hours(): return
     is_video=bool(post.video or post.animation or post.video_note or (post.document and post.document.mime_type and post.document.mime_type.startswith("video/")))
     if is_video and (DISABLE_VIDEO or THREADS_DISABLE_VIDEO):
-        save_posted_id(mid); return
+        return
     def get_full_tg_url(fp):
         if not fp: return None
         if fp.startswith("http"): return fp
@@ -377,8 +377,7 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
             logger.info(f"Фото -> public: {bool(pub_img)}")
         except Exception as e:
             logger.error(f"Photo error: {e}", exc_info=True)
-    th_res=post_to_threads(th_text, tg_img, pub_img) if THREADS_ENABLED else None
-    if th_res: save_posted_id(mid)
+    post_to_threads(th_text, tg_img, pub_img) if THREADS_ENABLED else None
 
 async def process_album_job(context: ContextTypes.DEFAULT_TYPE):
     mg_id=context.job.data
@@ -392,7 +391,8 @@ async def process_album_job(context: ContextTypes.DEFAULT_TYPE):
     if is_service_pinned_post(posts[0], raw_text):
         logger.info(f"Skip service pinned album {mid}")
         save_posted_id(mid); return
-    if not is_working_hours(): save_posted_id(mid); return
+    if not is_working_hours(): return
+    save_posted_id(mid)
     def get_full_tg_url(fp):
         if not fp: return None
         if fp.startswith("http"): return fp
@@ -410,8 +410,7 @@ async def process_album_job(context: ContextTypes.DEFAULT_TYPE):
             except: pass
     if not pub_imgs: return
     th_text=format_text_threads(raw_text, mid, True)
-    th_res=post_to_threads(th_text, pub_imgs=pub_imgs) if THREADS_ENABLED else None
-    if th_res: save_posted_id(mid)
+    post_to_threads(th_text, pub_imgs=pub_imgs) if THREADS_ENABLED else None
 
 async def auto_refresh_job(context: ContextTypes.DEFAULT_TYPE):
     logger.info("Авто-проверка токенов...")
@@ -449,7 +448,7 @@ def main():
     app.add_error_handler(error_handler)
     if app.job_queue:
         app.job_queue.run_repeating(auto_refresh_job, interval=24*60*60, first=60)
-        app.job_queue.run_once(sync_missing_posts_job, when=60, name="initial_sync")
+        # initial_sync убран чтобы не грузить дубли при Дедуп 0 - только по команде /sync
     now_t=datetime.now(TASHKENT_TZ).strftime("%H:%M")
     logger.info(f"Бот {SOURCE_CHANNEL} -> Threads {THREADS_USER_ID} | График {WORK_START_HOUR}-{WORK_END_HOUR} | Дедуп {len(POSTED_IDS)}")
     app.run_polling(allowed_updates=["channel_post","message"], poll_interval=15.0, timeout=60, drop_pending_updates=False)
