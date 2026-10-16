@@ -36,6 +36,7 @@ def start_keepalive():
 
 MEDIA_GROUP_CACHE = defaultdict(list)
 MEDIA_GROUP_LAST_TEXT = {}
+
 WORK_START_HOUR = int(os.getenv("WORK_START_HOUR", "9"))
 WORK_END_HOUR = int(os.getenv("WORK_END_HOUR", "21"))
 TASHKENT_TZ = timezone(timedelta(hours=5))
@@ -167,22 +168,31 @@ def upload_to_public_host(tg_url, filename, mime):
         try:
             files = {"fileToUpload": (filename, data, mime)}
             cr = requests.post("https://catbox.moe/user/api.php", data={"reqtype": "fileupload"}, files=files, timeout=30)
-            if cr.status_code == 200 and cr.text.startswith("http"):
+            if cr.status_code==200 and cr.text.startswith("http"):
                 url = cr.text.strip()
                 logger.info(f"upload catbox OK {url}")
                 return url
         except Exception as e:
-            logger.warning(f"upload catbox error {e}")
+            logger.warning(f"catbox error {e}")
         try:
             files = {"file": (filename, data, mime)}
             r2 = requests.post("https://0x0.st", files=files, timeout=30)
-            if r2.status_code == 200 and r2.text.startswith("http"):
+            if r2.status_code==200 and r2.text.startswith("http"):
                 url = r2.text.strip()
                 logger.info(f"upload 0x0.st OK {url}")
                 return url
         except Exception as e:
-            logger.warning(f"upload 0x0.st error {e}")
-        logger.warning("upload: catbox/0x0 failed, using direct tg url")
+            logger.warning(f"0x0.st error {e}")
+        try:
+            files = {"file": (filename, data, mime)}
+            r3 = requests.post("https://file.io", files=files, timeout=30)
+            j = r3.json()
+            if j.get("link"):
+                logger.info(f"upload file.io OK {j['link']}")
+                return j["link"]
+        except Exception as e:
+            logger.warning(f"file.io error {e}")
+        logger.warning("all hosts failed, using direct tg url as last resort")
         return tg_url
     except Exception as e:
         logger.error(f"upload error: {e}", exc_info=True)
@@ -205,7 +215,7 @@ def post_to_threads(text, tg_img=None, pub_img=None, video_url=None, pub_imgs=No
                 logger.info(f"Threads IMAGE publish {r2.status_code} {r2.text[:300]}")
                 return r2.json()
             else:
-                logger.warning(f"Threads IMAGE create fail {r.status_code} {r.text[:500]}")
+                logger.warning(f"Threads IMAGE create fail {r.status_code} {r.text[:500]} -> fallback TEXT")
         payload={"media_type":"TEXT","text":short_text,"access_token":THREADS_TOKEN}
         r=requests.post(create_url,data=payload,timeout=30)
         cid=r.json().get("id")
@@ -284,7 +294,7 @@ async def sync_missing_posts_job(context: ContextTypes.DEFAULT_TYPE):
         if not is_working_hours():
             logger.info("Синхронизация пропущена - вне графика 9-21")
             return
-        if len(POSTED_IDS) == 0:
+        if len(POSTED_IDS)==0:
             logger.info("sync skipped: Дедуп 0 - первый запуск, не постим 20 старых")
             return
         logger.info("=== Старт сверки последних 20 постов ===")
@@ -331,7 +341,7 @@ def is_service_pinned_post(post, raw_text):
     if getattr(post, 'pinned_message', None) is not None:
         return True
     if not raw_text: return False
-    low = raw_text.lower()
+    low=raw_text.lower()
     if "pinned a photo" in low or "pinned a video" in low or "pinned a message" in low:
         return True
     if "tashkent today - новости ташкента pinned" in low:
@@ -375,7 +385,8 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
             file_id=post.photo[-1].file_id
             file=await context.bot.get_file(file_id)
             tg_img=get_full_tg_url(file.file_path)
-            if tg_img: pub_img=upload_to_public_host(tg_img, "image.jpg", "image/jpeg")
+            if tg_img:
+                pub_img=upload_to_public_host(tg_img, "image.jpg", "image/jpeg")
             logger.info(f"Фото -> public: {bool(pub_img)}")
         except Exception as e:
             logger.error(f"Photo error: {e}", exc_info=True)
