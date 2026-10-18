@@ -158,45 +158,58 @@ def format_text_facebook(text, mid, with_link=True):
     return base[:997]+"..."
 
 def upload_to_public_host(tg_url, filename, mime):
-    try:
-        r = requests.get(tg_url, timeout=60)
-        if r.status_code!=200 or len(r.content)<500:
-            logger.warning(f"upload: tg download fail {r.status_code}")
-            return None
-        data = r.content
-        logger.info(f"upload: downloaded {len(data)} bytes {mime}")
+    """Фикс: 3 ретрая скачивания + 4 хоста"""
+    data = None
+    for attempt in range(3):
         try:
-            files = {"fileToUpload": (filename, data, mime)}
-            cr = requests.post("https://catbox.moe/user/api.php", data={"reqtype": "fileupload"}, files=files, timeout=30)
-            if cr.status_code==200 and cr.text.startswith("http"):
-                url = cr.text.strip()
-                logger.info(f"upload catbox OK {url}")
-                return url
+            r = requests.get(tg_url, timeout=90)
+            if r.status_code==200 and len(r.content)>=500:
+                data = r.content
+                logger.info(f"upload: downloaded {len(data)} bytes {mime} attempt {attempt+1}")
+                break
+            else:
+                logger.warning(f"upload: tg download fail {r.status_code} attempt {attempt+1}")
         except Exception as e:
-            logger.warning(f"catbox error {e}")
-        try:
-            files = {"file": (filename, data, mime)}
-            r2 = requests.post("https://0x0.st", files=files, timeout=30)
-            if r2.status_code==200 and r2.text.startswith("http"):
-                url = r2.text.strip()
-                logger.info(f"upload 0x0.st OK {url}")
-                return url
-        except Exception as e:
-            logger.warning(f"0x0.st error {e}")
-        try:
-            files = {"file": (filename, data, mime)}
-            r3 = requests.post("https://file.io", files=files, timeout=30)
-            j = r3.json()
-            if j.get("link"):
-                logger.info(f"upload file.io OK {j['link']}")
-                return j["link"]
-        except Exception as e:
-            logger.warning(f"file.io error {e}")
-        logger.warning("all hosts failed, using direct tg url as last resort")
-        return tg_url
-    except Exception as e:
-        logger.error(f"upload error: {e}", exc_info=True)
+            logger.warning(f"upload: tg download error {e} attempt {attempt+1}")
+            time.sleep(2)
+    if not data:
+        logger.warning("upload: tg download failed after 3 attempts")
         return None
+    try:
+        files = {"fileToUpload": (filename, data, mime)}
+        cr = requests.post("https://catbox.moe/user/api.php", data={"reqtype": "fileupload"}, files=files, timeout=30)
+        if cr.status_code==200 and cr.text.startswith("http"):
+            url = cr.text.strip()
+            logger.info(f"upload catbox OK {url}")
+            return url
+    except Exception as e: logger.warning(f"catbox error {e}")
+    try:
+        files = {"file": (filename, data, mime)}
+        r2 = requests.post("https://0x0.st", files=files, timeout=30)
+        if r2.status_code==200 and r2.text.startswith("http"):
+            url = r2.text.strip()
+            logger.info(f"upload 0x0.st OK {url}")
+            return url
+    except Exception as e: logger.warning(f"0x0.st error {e}")
+    try:
+        files = {"file": (filename, data, mime)}
+        r3 = requests.post("https://file.io", files=files, timeout=30)
+        j = r3.json()
+        if j.get("link"):
+            logger.info(f"upload file.io OK {j['link']}")
+            return j["link"]
+    except Exception as e: logger.warning(f"file.io error {e}")
+    try:
+        files = {"file": (filename, data, mime)}
+        r4 = requests.post("https://tmpfiles.org/api/v1/upload", files=files, timeout=30)
+        j = r4.json()
+        if j.get("data", {}).get("url"):
+            url = j["data"]["url"]
+            logger.info(f"upload tmpfiles OK {url}")
+            return url
+    except Exception as e: logger.warning(f"tmpfiles error {e}")
+    logger.warning("all hosts failed, using direct tg url as last resort")
+    return tg_url
 
 def post_to_threads(text, tg_img=None, pub_img=None, video_url=None, pub_imgs=None):
     if not THREADS_ENABLED: return None
@@ -219,10 +232,13 @@ def post_to_threads(text, tg_img=None, pub_img=None, video_url=None, pub_imgs=No
         payload={"media_type":"TEXT","text":short_text,"access_token":THREADS_TOKEN}
         r=requests.post(create_url,data=payload,timeout=30)
         cid=r.json().get("id")
-        if not cid: return None
+        if not cid: 
+            logger.warning(f"Threads TEXT create fail {r.text[:500]}")
+            return None
         time.sleep(2)
         pub_url=f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads_publish"
         r2=requests.post(pub_url,data={"creation_id":cid,"access_token":THREADS_TOKEN},timeout=30)
+        logger.info(f"Threads TEXT publish {r2.status_code}")
         return r2.json()
     except Exception as e:
         logger.error(f"Threads error: {e}", exc_info=True)
@@ -381,15 +397,19 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
     th_text=format_text_threads(raw_text, mid, True)
     tg_img=None; pub_img=None
     if post.photo:
-        try:
-            file_id=post.photo[-1].file_id
-            file=await context.bot.get_file(file_id)
-            tg_img=get_full_tg_url(file.file_path)
-            if tg_img:
-                pub_img=upload_to_public_host(tg_img, "image.jpg", "image/jpeg")
-            logger.info(f"Фото -> public: {bool(pub_img)}")
-        except Exception as e:
-            logger.error(f"Photo error: {e}", exc_info=True)
+        for attempt in range(3):
+            try:
+                file_id=post.photo[-1].file_id
+                file=await context.bot.get_file(file_id)
+                tg_img=get_full_tg_url(file.file_path)
+                if tg_img:
+                    pub_img=upload_to_public_host(tg_img, "image.jpg", "image/jpeg")
+                    if pub_img:
+                        logger.info(f"Фото -> public: {pub_img} attempt {attempt+1}")
+                        break
+            except Exception as e:
+                logger.error(f"Photo error attempt {attempt+1}: {e}", exc_info=True)
+                time.sleep(2)
     post_to_threads(th_text, tg_img, pub_img) if THREADS_ENABLED else None
 
 async def process_album_job(context: ContextTypes.DEFAULT_TYPE):
@@ -413,15 +433,22 @@ async def process_album_job(context: ContextTypes.DEFAULT_TYPE):
     pub_imgs=[]
     for idx,p in enumerate(posts):
         if p.photo:
-            try:
-                file_id=p.photo[-1].file_id
-                file=await context.bot.get_file(file_id)
-                tg_url=get_full_tg_url(file.file_path)
-                if tg_url:
-                    pub=upload_to_public_host(tg_url, f"image_{idx}.jpg", "image/jpeg")
-                    if pub: pub_imgs.append(pub)
-            except: pass
-    if not pub_imgs: return
+            for attempt in range(3):
+                try:
+                    file_id=p.photo[-1].file_id
+                    file=await context.bot.get_file(file_id)
+                    tg_url=get_full_tg_url(file.file_path)
+                    if tg_url:
+                        pub=upload_to_public_host(tg_url, f"image_{idx}.jpg", "image/jpeg")
+                        if pub: 
+                            pub_imgs.append(pub)
+                            break
+                except Exception as e:
+                    logger.error(f"Album error attempt {attempt+1}: {e}")
+                    time.sleep(1)
+    if not pub_imgs: 
+        logger.warning("Album: no images after retries")
+        return
     th_text=format_text_threads(raw_text, mid, True)
     post_to_threads(th_text, pub_imgs=pub_imgs) if THREADS_ENABLED else None
 
