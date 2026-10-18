@@ -158,7 +158,6 @@ def format_text_facebook(text, mid, with_link=True):
     return base[:997]+"..."
 
 def upload_to_public_host(tg_url, filename, mime):
-    """Фикс: 3 ретрая скачивания + 4 хоста"""
     data = None
     for attempt in range(3):
         try:
@@ -167,29 +166,25 @@ def upload_to_public_host(tg_url, filename, mime):
                 data = r.content
                 logger.info(f"upload: downloaded {len(data)} bytes {mime} attempt {attempt+1}")
                 break
-            else:
-                logger.warning(f"upload: tg download fail {r.status_code} attempt {attempt+1}")
         except Exception as e:
-            logger.warning(f"upload: tg download error {e} attempt {attempt+1}")
+            logger.warning(f"tg download error {e} attempt {attempt+1}")
             time.sleep(2)
     if not data:
-        logger.warning("upload: tg download failed after 3 attempts")
+        logger.warning("tg download failed after 3 attempts")
         return None
     try:
         files = {"fileToUpload": (filename, data, mime)}
         cr = requests.post("https://catbox.moe/user/api.php", data={"reqtype": "fileupload"}, files=files, timeout=30)
         if cr.status_code==200 and cr.text.startswith("http"):
-            url = cr.text.strip()
-            logger.info(f"upload catbox OK {url}")
-            return url
+            logger.info(f"upload catbox OK {cr.text.strip()}")
+            return cr.text.strip()
     except Exception as e: logger.warning(f"catbox error {e}")
     try:
         files = {"file": (filename, data, mime)}
         r2 = requests.post("https://0x0.st", files=files, timeout=30)
         if r2.status_code==200 and r2.text.startswith("http"):
-            url = r2.text.strip()
-            logger.info(f"upload 0x0.st OK {url}")
-            return url
+            logger.info(f"upload 0x0.st OK {r2.text.strip()}")
+            return r2.text.strip()
     except Exception as e: logger.warning(f"0x0.st error {e}")
     try:
         files = {"file": (filename, data, mime)}
@@ -199,16 +194,7 @@ def upload_to_public_host(tg_url, filename, mime):
             logger.info(f"upload file.io OK {j['link']}")
             return j["link"]
     except Exception as e: logger.warning(f"file.io error {e}")
-    try:
-        files = {"file": (filename, data, mime)}
-        r4 = requests.post("https://tmpfiles.org/api/v1/upload", files=files, timeout=30)
-        j = r4.json()
-        if j.get("data", {}).get("url"):
-            url = j["data"]["url"]
-            logger.info(f"upload tmpfiles OK {url}")
-            return url
-    except Exception as e: logger.warning(f"tmpfiles error {e}")
-    logger.warning("all hosts failed, using direct tg url as last resort")
+    logger.warning("all hosts failed, using direct tg url")
     return tg_url
 
 def post_to_threads(text, tg_img=None, pub_img=None, video_url=None, pub_imgs=None):
@@ -232,13 +218,10 @@ def post_to_threads(text, tg_img=None, pub_img=None, video_url=None, pub_imgs=No
         payload={"media_type":"TEXT","text":short_text,"access_token":THREADS_TOKEN}
         r=requests.post(create_url,data=payload,timeout=30)
         cid=r.json().get("id")
-        if not cid: 
-            logger.warning(f"Threads TEXT create fail {r.text[:500]}")
-            return None
+        if not cid: return None
         time.sleep(2)
         pub_url=f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads_publish"
         r2=requests.post(pub_url,data={"creation_id":cid,"access_token":THREADS_TOKEN},timeout=30)
-        logger.info(f"Threads TEXT publish {r2.status_code}")
         return r2.json()
     except Exception as e:
         logger.error(f"Threads error: {e}", exc_info=True)
