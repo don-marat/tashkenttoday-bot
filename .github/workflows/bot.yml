@@ -19,5 +19,5 @@ jobs:
           THREADS_USER_ID: ${{ secrets.THREADS_USER_ID }}
           SOURCE_CHANNEL: "@tashkenttodayuz"
           POSTED_FILE: posted_ids.json
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          【entity-GITHUB_TOKEN¦canonical_name=GitHub】: ${{ secrets.【entity-GITHUB_TOKEN¦canonical_name=GitHub】 }}
           GITHUB_REPO: don-marat/tashkenttoday-bot
