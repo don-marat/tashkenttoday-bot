@@ -1,7 +1,7 @@
 name: TashkentToday Bot
 on:
   schedule:
-    - cron: '*/15 * * * *'  # каждые 15 мин, с 4 до 16 UTC = 9-21 Ташкент
+    - cron: '*/15 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -15,9 +15,9 @@ jobs:
       - run: pip install -r requirements.txt
       - run: python bot_github.py
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           THREADS_TOKEN: ${{ secrets.THREADS_TOKEN }}
           THREADS_USER_ID: ${{ secrets.THREADS_USER_ID }}
           SOURCE_CHANNEL: "@tashkenttodayuz"
           POSTED_FILE: posted_ids.json
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: don-marat/tashkenttoday-bot
