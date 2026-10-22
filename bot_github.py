@@ -1,10 +1,4 @@
-import os
-import requests
-import json
-import re
-import html
-import time
-import base64
+import os, requests, json, re, html, time, base64
 from datetime import datetime, timezone, timedelta
 
 TASHKENT_TZ = timezone(timedelta(hours=5))
@@ -12,7 +6,7 @@ SOURCE_CHANNEL = os.getenv("SOURCE_CHANNEL", "@tashkenttodayuz")
 THREADS_USER_ID = os.getenv("THREADS_USER_ID", "27092394720363294")
 THREADS_TOKEN = os.getenv("THREADS_TOKEN")
 POSTED_FILE = os.getenv("POSTED_FILE", "posted_ids.json")
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_TOKEN = os.getenv("【entity-GITHUB¦canonical_name=GitHub】_TOKEN")
 GITHUB_REPO = os.getenv("GITHUB_REPO", "don-marat/tashkenttoday-bot")
 
 POSTED_IDS = set()
@@ -30,9 +24,7 @@ def save_posted_id(mid):
         json.dump(to_save, f)
     print(f"ID {mid} сохранен, всего {len(POSTED_IDS)}")
 
-def is_already_posted(mid):
-    return mid in POSTED_IDS
-
+def is_already_posted(mid): return mid in POSTED_IDS
 def is_working_hours():
     now = datetime.now(TASHKENT_TZ)
     return 9 <= now.hour < 21
@@ -40,30 +32,25 @@ def is_working_hours():
 def format_text_threads(text, mid):
     text = text.strip()
     paras = [p.strip() for p in re.split(r'\n\s*\n+', text) if p.strip()]
-    if not paras:
-        return ""
+    if not paras: return ""
     title = paras[0].strip()
     first = paras[1] if len(paras) > 1 else ""
-    clean = SOURCE_CHANNEL.replace('@', '').strip()
+    clean = SOURCE_CHANNEL.replace('@','').strip()
     link = f"https://t.me/{clean}/{mid}"
     more = f"Подробнее: {link}"
     LIMIT = 500
     if first:
         cand = f"{title}\n\n{first}\n\n{more}"
-        if len(cand) <= LIMIT:
-            return cand
+        if len(cand) <= LIMIT: return cand
     cand_title = f"{title}\n\n{more}"
-    if len(cand_title) <= LIMIT:
-        return cand_title
+    if len(cand_title) <= LIMIT: return cand_title
     return title[:497] + "..." if len(title) > LIMIT else title
 
 def upload_to_public_host(tg_url):
-    if not tg_url:
-        return None
+    if not tg_url: return None
     try:
         r = requests.get(tg_url, timeout=90)
-        if r.status_code != 200 or len(r.content) < 500:
-            return tg_url
+        if r.status_code != 200 or len(r.content) < 500: return tg_url
         data = r.content
         files = {"fileToUpload": ("image.jpg", data, "image/jpeg")}
         cr = requests.post("https://catbox.moe/user/api.php", data={"reqtype": "fileupload"}, files=files, timeout=30)
@@ -110,7 +97,7 @@ def post_to_threads(text, pub_img=None):
 
 def fetch_last_channel_posts(n=20):
     try:
-        clean = SOURCE_CHANNEL.replace('@', '').strip()
+        clean = SOURCE_CHANNEL.replace('@','').strip()
         url = f"https://t.me/s/{clean}"
         r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
         if r.status_code != 200:
@@ -120,8 +107,7 @@ def fetch_last_channel_posts(n=20):
         posts = []
         for wrap in wraps:
             m = re.search(rf'data-post="{re.escape(clean)}/(\d+)"', wrap)
-            if not m:
-                continue
+            if not m: continue
             mid = int(m.group(1))
             text = ""
             tm = re.search(r'<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>', wrap, re.DOTALL)
@@ -141,8 +127,7 @@ def fetch_last_channel_posts(n=20):
             pm = re.search(r"background-image:url\('(.*?)'\)", wrap)
             if pm:
                 photo = pm.group(1)
-                if photo.startswith("//"):
-                    photo = "https:" + photo
+                if photo.startswith("//"): photo = "https:" + photo
                 photo = photo.replace("\\", "")
             if text or photo:
                 posts.append({"id": mid, "text": text, "photo": photo})
@@ -165,14 +150,12 @@ def push_posted():
         content = open(POSTED_FILE, "r", encoding="utf-8").read()
         b64 = base64.b64encode(content.encode()).decode()
         data = {"message": f"Update posted_ids {len(POSTED_IDS)} {datetime.now(TASHKENT_TZ).strftime('%Y-%m-%d %H:%M')}", "content": b64, "branch": "main"}
-        if sha:
-            data["sha"] = sha
+        if sha: data["sha"] = sha
         r2 = requests.put(url, headers=headers, json=data, timeout=20)
         print(f"GitHub push {r2.status_code}")
     except Exception as e:
         print(f"push error {e}")
 
-# === MAIN ===
 if not is_working_hours():
     print("Вне графика 9-21, skip")
     exit(0)
@@ -180,7 +163,6 @@ if not is_working_hours():
 posts = fetch_last_channel_posts(20)
 print(f"POSTED_IDS len {len(POSTED_IDS)}")
 
-# Первый запуск — просто сохраняем последние 20 как уже виденные
 if len(POSTED_IDS) == 0 and posts:
     print(f"Bootstrap: сохраняем {len(posts)} ID без постинга")
     for p in posts:
@@ -190,14 +172,11 @@ if len(POSTED_IDS) == 0 and posts:
     exit(0)
 
 added = 0
-# идем от старых к новым чтобы порядок сохранить
 for p in reversed(posts):
     mid = p["id"]
-    if is_already_posted(mid):
-        continue
+    if is_already_posted(mid): continue
     raw = p["text"] or ""
-    if not raw or len(raw) < 5:
-        continue
+    if not raw or len(raw) < 5: continue
     low = raw.lower()
     if "pinned a photo" in low or "pinned a video" in low:
         save_posted_id(mid)
