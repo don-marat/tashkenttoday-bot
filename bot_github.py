@@ -32,7 +32,7 @@ def is_working_hours():
     now = datetime.now(TASHKENT_TZ)
     return WORK_START_HOUR <= now.hour < WORK_END_HOUR
 
-# === ФИКС: ссылка никогда не режется ===
+# === ФИКС ссылки t.me/ta ===
 def format_text_threads(text, mid, with_link=True):
     text=text.strip()
     paras=[p.strip() for p in re.split(r'\n\s*\n+', text) if p.strip()]
@@ -44,38 +44,48 @@ def format_text_threads(text, mid, with_link=True):
     link=f"t.me/{clean}/{mid}"
     more=f"Подробнее: {link}"
     LIMIT=500
-
     if not with_link:
         base=f"{title}\n\n{first}" if first else title
         return base[:LIMIT-3]+"..." if len(base)>LIMIT else base
-
-    # 1) Все вместе
     cand=f"{title}\n\n{first}\n\n{more}" if first else f"{title}\n\n{more}"
     if len(cand)<=LIMIT: return cand
-
-    # 2) Режем first, more сохраняем целиком
     reserved=len(title)+len(more)+4
     allowed=LIMIT-reserved
     if first and allowed>80:
         cut=first[:allowed]
-        if len(first)>allowed:
-            cut=cut.rsplit(' ',1)[0]+"..."
+        if len(first)>allowed: cut=cut.rsplit(' ',1)[0]+"..."
         cand2=f"{title}\n\n{cut}\n\n{more}"
         if len(cand2)<=LIMIT: return cand2
-
-    # 3) Только title + more
     cand3=f"{title}\n\n{more}"
     if len(cand3)<=LIMIT: return cand3
-
-    # 4) Режем title, more оставляем
     allowed_title=LIMIT-len(more)-2-3
     if allowed_title>30:
         title_cut=title[:allowed_title].rsplit(' ',1)[0]+"..."
         return f"{title_cut}\n\n{more}"
     return more
 
-# Ускорение — без catbox, прямая ссылка
+# === ФИКС 400 Media download has failed ===
 def upload_to_public_host(tg_url, filename="image.jpg", mime="image/jpeg"):
+    try:
+        r = requests.get(tg_url, timeout=15)
+        if r.status_code != 200 or len(r.content) < 1000:
+            return tg_url
+        data = r.content
+    except: return tg_url
+    try:
+        files = {'file': (filename, data, mime)}
+        r = requests.post('https://0x0.st', files=files, timeout=15)
+        if r.status_code == 200 and r.text.startswith('https://'):
+            print(f"0x0.st OK {r.text[:60]}")
+            return r.text.strip()
+    except Exception as e: print(f"0x0.st fail {e}")
+    try:
+        files = {'fileToUpload': (filename, data, mime)}
+        r = requests.post('https://catbox.moe/user/api.php', data={'reqtype':'fileupload'}, files=files, timeout=15)
+        if r.status_code == 200 and r.text.startswith('https://'):
+            print(f"catbox OK {r.text[:60]}")
+            return r.text.strip()
+    except Exception as e: print(f"catbox fail {e}")
     return tg_url
 
 def post_to_threads(text, tg_img=None, pub_img=None, pub_imgs=None):
@@ -83,19 +93,14 @@ def post_to_threads(text, tg_img=None, pub_img=None, pub_imgs=None):
         print("No THREADS_TOKEN"); return None
     try:
         create_url=f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads"
-        # НЕ режем до 480! Уже обрезано в format_text_threads до 500
         short_text=text
         if len(short_text)>500:
-            # Если вдруг больше — режем ДО ссылки
             if "Подробнее:" in short_text:
                 parts=short_text.rsplit("Подробнее:",1)
                 head=parts[0][:500-len("Подробнее: t.me/x/1")-20]
                 short_text=head.strip()+"\n\nПодробнее: "+parts[1].strip()
             short_text=short_text[:500]
-
         img_list=pub_imgs or ([pub_img or tg_img] if (pub_img or tg_img) else [])
-
-        # Карусель если >1 фото
         if len(img_list)>1:
             item_ids=[]
             for img_url in img_list[:10]:
@@ -117,7 +122,6 @@ def post_to_threads(text, tg_img=None, pub_img=None, pub_imgs=None):
                     print(f"CAROUSEL publish {r2.status_code}")
                     if r2.status_code==200: return r2.json()
             img_list=[img_list[0]]
-
         img_to_use=img_list[0] if img_list else None
         if img_to_use:
             payload={"media_type":"IMAGE","text":short_text,"image_url":img_to_use,"access_token":THREADS_TOKEN}
@@ -130,7 +134,6 @@ def post_to_threads(text, tg_img=None, pub_img=None, pub_imgs=None):
                 r2=requests.post(pub_url, data={"creation_id":cid,"access_token":THREADS_TOKEN}, timeout=20)
                 print(f"IMAGE publish {r2.status_code} {r2.text[:200]}")
                 if r2.status_code==200 and r2.json().get("id"): return r2.json()
-
         payload={"media_type":"TEXT","text":short_text,"access_token":THREADS_TOKEN}
         r=requests.post(create_url, data=payload, timeout=20)
         print(f"TEXT create {r.status_code}")
@@ -187,7 +190,7 @@ def push_posted():
         data={"message":f"Update posted_ids {len(POSTED_IDS)} {datetime.now(TASHKENT_TZ).strftime('%Y-%m-%d %H:%M')}","content":b64,"branch":"main"}
         if sha: data["sha"]=sha
         r2=requests.put(url, headers=headers, json=data, timeout=15)
-        print(f"GitHub push {r2.status_code}")
+        print(f"GitHub push {r2.status_code} {r2.text[:200]}")
     except Exception as e: print(f"push error {e}")
 
 if not is_working_hours():
