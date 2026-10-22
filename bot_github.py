@@ -32,7 +32,6 @@ def is_working_hours():
     now = datetime.now(TASHKENT_TZ)
     return WORK_START_HOUR <= now.hour < WORK_END_HOUR
 
-# === ФИКС ссылки t.me/ta ===
 def format_text_threads(text, mid, with_link=True):
     text=text.strip()
     paras=[p.strip() for p in re.split(r'\n\s*\n+', text) if p.strip()]
@@ -64,7 +63,6 @@ def format_text_threads(text, mid, with_link=True):
         return f"{title_cut}\n\n{more}"
     return more
 
-# === ФИКС 400 Media download has failed ===
 def upload_to_public_host(tg_url, filename="image.jpg", mime="image/jpeg"):
     try:
         r = requests.get(tg_url, timeout=15)
@@ -96,30 +94,32 @@ def post_to_threads(text, tg_img=None, pub_img=None, pub_imgs=None):
         short_text=text
         if len(short_text)>500:
             if "Подробнее:" in short_text:
-                parts=short_text.rsplit("Подробнее:",1)
-                head=parts[0][:500-len("Подробнее: t.me/x/1")-20]
-                short_text=head.strip()+"\n\nПодробнее: "+parts[1].strip()
-            short_text=short_text[:500]
+                idx = short_text.rfind("Подробнее:")
+                more = short_text[idx:].strip()
+                head = short_text[:idx].strip()
+                allowed = 500 - len("\n\n" + more)
+                if len(head) > allowed:
+                    head = head[:allowed].rsplit(' ',1)[0] + "..."
+                short_text = f"{head}\n\n{more}" if head else more
+            else:
+                short_text = short_text[:500]
         img_list=pub_imgs or ([pub_img or tg_img] if (pub_img or tg_img) else [])
         if len(img_list)>1:
             item_ids=[]
             for img_url in img_list[:10]:
                 payload={"media_type":"IMAGE","image_url":img_url,"is_carousel_item":True,"access_token":THREADS_TOKEN}
                 r=requests.post(create_url, data=payload, timeout=20)
-                print(f"Carousel item {r.status_code} {r.text[:150]}")
                 iid=r.json().get("id")
                 if iid: item_ids.append(iid)
                 time.sleep(1)
             if item_ids:
                 payload={"media_type":"CAROUSEL","text":short_text,"children":",".join(item_ids),"access_token":THREADS_TOKEN}
                 r=requests.post(create_url, data=payload, timeout=20)
-                print(f"CAROUSEL create {r.status_code}")
                 cid=r.json().get("id")
                 if cid:
                     time.sleep(5)
                     pub_url=f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads_publish"
                     r2=requests.post(pub_url, data={"creation_id":cid,"access_token":THREADS_TOKEN}, timeout=30)
-                    print(f"CAROUSEL publish {r2.status_code}")
                     if r2.status_code==200: return r2.json()
             img_list=[img_list[0]]
         img_to_use=img_list[0] if img_list else None
@@ -198,7 +198,6 @@ if not is_working_hours():
 
 posts=fetch_last_channel_posts(20)
 print(f"POSTED_IDS len {len(POSTED_IDS)}")
-
 if len(POSTED_IDS)==0 and posts:
     print(f"Bootstrap {len(posts)} ID")
     for p in posts: save_posted_id(p["id"])
